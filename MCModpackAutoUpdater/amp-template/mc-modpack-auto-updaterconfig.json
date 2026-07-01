@@ -1,0 +1,52 @@
+[
+  {
+    "DisplayName": "Release Repository",
+    "Description": "GitHub repository that publishes MCModpackAutoUpdater ZIP release assets.",
+    "FieldName": "ReleaseRepository",
+    "InputType": "text",
+    "Category": "Updater:download",
+    "Subcategory": "Release:download:1",
+    "Required": true,
+    "DefaultValue": "MystifiedSky/MCModpackAutoUpdater"
+  },
+  {
+    "DisplayName": "Linux Release Asset",
+    "Description": "Linux x64 ZIP asset name in the GitHub release.",
+    "FieldName": "LinuxReleaseAsset",
+    "InputType": "text",
+    "Category": "Updater:download",
+    "Subcategory": "Release:download:1",
+    "Required": true,
+    "DefaultValue": "mc-modpack-auto-updater-linux-x64.zip"
+  },
+  {
+    "DisplayName": "Windows Release Asset",
+    "Description": "Windows x64 ZIP asset name in the GitHub release.",
+    "FieldName": "WindowsReleaseAsset",
+    "InputType": "text",
+    "Category": "Updater:download",
+    "Subcategory": "Release:download:1",
+    "Required": true,
+    "DefaultValue": "mc-modpack-auto-updater-win-x64.zip"
+  },
+  {
+    "DisplayName": "Web UI Port",
+    "Description": "TCP port used by the updater web interface. This must be set before the app starts.",
+    "FieldName": "WebUIPort",
+    "InputType": "number",
+    "Category": "Updater:download",
+    "Subcategory": "Web UI:globe:2",
+    "DefaultValue": "9090",
+    "MinValue": "1",
+    "MaxValue": "65535"
+  },
+  {
+    "DisplayName": "Web UI Database Path",
+    "Description": "SQLite database file path. This is a startup setting and is not managed in the web UI.",
+    "FieldName": "WebUiDatabasePath",
+    "InputType": "text",
+    "Category": "Updater:download",
+    "Subcategory": "Web UI:globe:2",
+    "DefaultValue": "mc-modpack-auto-updater.db"
+  }
+]

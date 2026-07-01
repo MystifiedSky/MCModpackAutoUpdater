@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="MCAgent/MCAgent.csproj" />
+  <Project Path="MCModpackAutoUpdater/MCModpackAutoUpdater.csproj" />
+</Solution>

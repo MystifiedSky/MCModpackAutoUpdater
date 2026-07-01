@@ -1,0 +1,28 @@
+@model CreateUserViewModel
+@{
+    ViewData["Title"] = "Create User";
+    var roles = ViewBag.Roles as string[] ?? UpdaterRoles.All;
+}
+
+<section class="panel narrow">
+    <h1>Create User</h1>
+    <form method="post">
+        <div asp-validation-summary="All" class="validation"></div>
+        <label asp-for="UserName"></label>
+        <input asp-for="UserName" autocomplete="username" />
+        <label asp-for="Email"></label>
+        <input asp-for="Email" autocomplete="email" />
+        <label asp-for="Role"></label>
+        <select asp-for="Role">
+            @foreach (var role in roles)
+            {
+                <option value="@role">@role</option>
+            }
+        </select>
+        <label asp-for="Password"></label>
+        <input asp-for="Password" autocomplete="new-password" />
+        <label asp-for="ConfirmPassword"></label>
+        <input asp-for="ConfirmPassword" autocomplete="new-password" />
+        <button type="submit" class="primary">Create</button>
+    </form>
+</section>

@@ -1,0 +1,116 @@
+@model ModpackSettingsFormModel
+@{
+    var action = ViewData["Action"] as string ?? "UpdateModpack";
+    var button = ViewData["Button"] as string ?? "Save";
+    var agentOptions = ViewData["AgentOptions"] as IReadOnlyList<AgentOptionViewModel> ?? Array.Empty<AgentOptionViewModel>();
+}
+
+<form asp-action="@action" method="post" class="form-grid modpack-form">
+    <input type="hidden" asp-for="Index" />
+    <input type="hidden" asp-for="Id" />
+    <div>
+        <label asp-for="Name"></label>
+        <input asp-for="Name" required />
+    </div>
+    <div>
+        <label asp-for="AgentNodeId">Assigned Agent</label>
+        <select asp-for="AgentNodeId" required>
+            <option value="">Select agent</option>
+            @foreach (var agent in agentOptions)
+            {
+                <option value="@agent.Id">@agent.Name (@agent.ExecutionMode, @agent.Host)@(agent.Enabled ? string.Empty : " - disabled")</option>
+            }
+        </select>
+    </div>
+    <div>
+        <label asp-for="Provider"></label>
+        <select asp-for="Provider">
+            <option value="CurseForge">CurseForge</option>
+            <option value="FTB">FTB</option>
+            <option value="Direct">Direct URL / Custom</option>
+            <option value="Custom">Custom (legacy)</option>
+        </select>
+    </div>
+    <div>
+        <label asp-for="SourceReference">Source Reference</label>
+        <input asp-for="SourceReference" placeholder="CurseForge project ID or FTB pack ID" />
+    </div>
+    <div>
+        <label asp-for="ServerPackUrl">Server Pack URL</label>
+        <input asp-for="ServerPackUrl" placeholder="optional direct ZIP URL" />
+    </div>
+    <div>
+        <label asp-for="VersionLock">Version Lock</label>
+        <input asp-for="VersionLock" placeholder="latest" />
+    </div>
+    <div>
+        <label asp-for="CurrentVersion">Current Version</label>
+        <input asp-for="CurrentVersion" placeholder="initial file/version ID" />
+    </div>
+    <div>
+        <label asp-for="RequestedVersion">Requested Version</label>
+        <input asp-for="RequestedVersion" placeholder="optional override" />
+    </div>
+    <div class="wide">
+        <label asp-for="InstallRootPath">Install Root Path</label>
+        <input asp-for="InstallRootPath" required />
+    </div>
+    <div>
+        <label asp-for="OverrideDirectory">Override Directory</label>
+        <input asp-for="OverrideDirectory" />
+    </div>
+    <div>
+        <label asp-for="ScheduleTime">Daily Check Time</label>
+        <input asp-for="ScheduleTime" placeholder="03:00" />
+    </div>
+    <div>
+        <label asp-for="RestartMode">Restart Mode</label>
+        <input asp-for="RestartMode" placeholder="amp or none" required />
+    </div>
+    <div>
+        <label asp-for="WarningMinutes">Warning Minutes</label>
+        <input asp-for="WarningMinutes" type="number" min="0" max="240" />
+    </div>
+    <div>
+        <label asp-for="AmpInstanceName">AMP Instance Name</label>
+        <input asp-for="AmpInstanceName" />
+    </div>
+    <div>
+        <label asp-for="AmpApiUrl">AMP Instance API URL</label>
+        <input asp-for="AmpApiUrl" />
+    </div>
+    <div class="wide">
+        <label asp-for="AmpConfigValuesJson">AMP Config JSON</label>
+        <textarea asp-for="AmpConfigValuesJson" rows="3" placeholder="{&quot;node&quot;:&quot;value&quot;}"></textarea>
+    </div>
+    <div class="wide">
+        <label asp-for="PreservedPathsText">Preserved Paths</label>
+        <textarea asp-for="PreservedPathsText" rows="3" placeholder="One install-root-relative path per line"></textarea>
+    </div>
+    <div>
+        <label asp-for="ServerPackExcludedCurseForgeProjectIdsText">Excluded CurseForge Project IDs</label>
+        <textarea asp-for="ServerPackExcludedCurseForgeProjectIdsText" rows="3" placeholder="One project ID per line"></textarea>
+    </div>
+    <div>
+        <label asp-for="ServerPackExcludedPathsText">Generated Pack Excluded Paths</label>
+        <textarea asp-for="ServerPackExcludedPathsText" rows="3" placeholder="One generated-pack-relative path per line"></textarea>
+    </div>
+    <div>
+        <label asp-for="DiscordAnnouncementChannelId">Discord Channel ID</label>
+        <input asp-for="DiscordAnnouncementChannelId" />
+    </div>
+    <div>
+        <label asp-for="DiscordAnnouncementRoleId">Discord Role ID</label>
+        <input asp-for="DiscordAnnouncementRoleId" />
+    </div>
+    <div class="checks wide">
+        <label class="check"><input asp-for="Enabled" /> <span>Enabled</span></label>
+        <label class="check"><input asp-for="BuildServerPackFromClientFiles" /> <span>Build from CurseForge client files</span></label>
+        <label class="check"><input asp-for="ForceFullSync" /> <span>Force full sync</span></label>
+        <label class="check"><input asp-for="SkipWarnings" /> <span>Skip warnings</span></label>
+        <label class="check"><input asp-for="IgnoreCurrentVersion" /> <span>Ignore current version</span></label>
+    </div>
+    <div class="wide actions">
+        <button type="submit" class="primary">@button</button>
+    </div>
+</form>

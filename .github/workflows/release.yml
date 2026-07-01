@@ -1,0 +1,92 @@
+name: Build release assets
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.runtime }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: linux-x64
+            asset_name: mc-modpack-auto-updater-linux-x64.zip
+          - runtime: win-x64
+            asset_name: mc-modpack-auto-updater-win-x64.zip
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Restore
+        run: dotnet restore ./MCModpackAutoUpdater.slnx
+
+      - name: Publish
+        run: >
+          dotnet publish ./MCModpackAutoUpdater/MCModpackAutoUpdater.csproj
+          --configuration Release
+          --runtime ${{ matrix.runtime }}
+          --self-contained true
+          --output ./artifacts/${{ matrix.runtime }}/publish
+          /p:ContinuousIntegrationBuild=true
+
+      - name: Package
+        run: |
+          cd ./artifacts/${{ matrix.runtime }}/publish
+          zip -r ../${{ matrix.asset_name }} .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ./artifacts/${{ matrix.runtime }}/${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  publish-main-release:
+    name: Publish latest release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./release-assets
+          merge-multiple: true
+
+      - name: Move release tag to current commit
+        run: |
+          git tag --force latest "${GITHUB_SHA}"
+          git push origin refs/tags/latest --force
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          body: |
+            Automated build from main.
+
+            Commit: ${{ github.sha }}
+          files: ./release-assets/*.zip
+          overwrite_files: true
+          make_latest: true

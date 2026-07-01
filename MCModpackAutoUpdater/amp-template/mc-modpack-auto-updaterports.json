@@ -1,0 +1,9 @@
+[
+  {
+    "Protocol": "TCP",
+    "Port": 9090,
+    "Ref": "WebUIPort",
+    "Name": "Web UI",
+    "Description": "MCModpackAutoUpdater web interface"
+  }
+]

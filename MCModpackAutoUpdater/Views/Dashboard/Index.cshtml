@@ -1,0 +1,119 @@
+@model DashboardViewModel
+@{
+    ViewData["Title"] = "Dashboard";
+    var canRun = User.IsInRole(UpdaterRoles.Admin) || User.IsInRole(UpdaterRoles.Operator);
+}
+
+<section class="page-head">
+    <div>
+        <h1>Modpack Updates</h1>
+        <p class="muted">Configured profiles, local state, and manual update controls.</p>
+    </div>
+</section>
+
+<section class="grid summary-grid">
+    <article class="card summary-card">
+        <span class="muted">Profiles</span>
+        <strong>@Model.TotalProfiles</strong>
+    </article>
+    <article class="card summary-card">
+        <span class="muted">Enabled Scheduled</span>
+        <strong>@Model.EnabledScheduledProfiles</strong>
+    </article>
+    <article class="card summary-card">
+        <span class="muted">Active Commands</span>
+        <strong>@Model.ActiveCommands</strong>
+    </article>
+    <article class="card summary-card">
+        <span class="muted">Discord Ready</span>
+        <strong>@Model.DiscordReadyProfiles</strong>
+    </article>
+</section>
+
+@if (Model.Profiles.Count == 0)
+{
+    <section class="panel">
+        <p>No modpack profiles are configured.</p>
+    </section>
+}
+else
+{
+    <section class="grid">
+        @foreach (var profile in Model.Profiles)
+        {
+            <article class="card">
+                <div class="card-head">
+                    <div>
+                        <h2>@profile.Name</h2>
+                        <p class="muted">Agent: @(profile.AgentName ?? "Unassigned")</p>
+                        <p class="muted">@profile.Provider · @profile.RestartMode</p>
+                    </div>
+                    <span class="badge @(profile.Enabled ? "ok" : "off")">@(profile.Enabled ? "Enabled" : "Disabled")</span>
+                </div>
+                <dl>
+                    <dt>Source</dt>
+                    <dd>@(string.IsNullOrWhiteSpace(profile.SourceReference) ? "Direct URL" : profile.SourceReference)</dd>
+                    <dt>Schedule</dt>
+                    <dd>@(string.IsNullOrWhiteSpace(profile.ScheduleTime) ? "Not scheduled" : profile.ScheduleTime)</dd>
+                    <dt>Last queued</dt>
+                    <dd>@(profile.LastQueuedUtc?.ToString("u") ?? "Never")</dd>
+                    <dt>Last check</dt>
+                    <dd>@(profile.LastDryRunCheckUtc?.ToString("u") ?? "Never")</dd>
+                    <dt>Current</dt>
+                    <dd>@(profile.CurrentVersionDisplay ?? profile.CurrentVersion ?? "Unknown")</dd>
+                    <dt>Last run</dt>
+                    <dd>@(profile.LastRunUtc?.ToString("u") ?? "Never")</dd>
+                    <dt>Updated</dt>
+                    <dd>@profile.UpdatedUtc.ToString("u")</dd>
+                    <dt>Last result</dt>
+                    <dd>
+                        @if (profile.LastRunUtc is null)
+                        {
+                            <span>None</span>
+                        }
+                        else if (profile.LastSucceeded)
+                        {
+                            <span class="status ok">@(profile.LastSkipped ? "Skipped" : "Completed")</span>
+                        }
+                        else
+                        {
+                            <span class="status bad">Failed</span>
+                        }
+                    </dd>
+                </dl>
+                @if (!string.IsNullOrWhiteSpace(profile.LastSummary))
+                {
+                    <p class="summary">@profile.LastSummary</p>
+                }
+                @if (!string.IsNullOrWhiteSpace(profile.LastDryRunCheckSummary))
+                {
+                    <p class="summary">Check: @profile.LastDryRunCheckSummary</p>
+                }
+                @if (canRun && profile.Enabled)
+                {
+                    <div class="actions">
+                        <form asp-controller="Dashboard" asp-action="Check" asp-route-profileId="@profile.Id" method="post">
+                            <button type="submit" @(profile.IsAssignedAgentEnabled ? null : "disabled")>Check</button>
+                        </form>
+                        <form asp-controller="Dashboard" asp-action="CheckAndQueue" asp-route-profileId="@profile.Id" method="post">
+                            <button type="submit" class="primary" @(profile.IsAssignedAgentEnabled && !profile.HasActiveCommand ? null : "disabled")>Check + Queue</button>
+                        </form>
+                        <form asp-controller="Dashboard" asp-action="Run" asp-route-profileId="@profile.Id" method="post">
+                            <button type="submit" class="danger" @(profile.IsAssignedAgentEnabled && !profile.HasActiveCommand ? null : "disabled")>Force Sync</button>
+                        </form>
+                    </div>
+                    @if (profile.HasActiveCommand)
+                    {
+                        <p class="muted">A sync command is already pending or running.</p>
+                    }
+                }
+                @if (canRun)
+                {
+                    <form asp-controller="Dashboard" asp-action="ToggleEnabled" asp-route-profileId="@profile.Id" method="post">
+                        <button type="submit">@(profile.Enabled ? "Disable" : "Enable")</button>
+                    </form>
+                }
+            </article>
+        }
+    </section>
+}

@@ -1,0 +1,175 @@
+@model SettingsIndexViewModel
+@{
+    ViewData["Title"] = "Settings";
+    ViewData["AgentOptions"] = Model.AgentOptions;
+}
+
+<section class="page-head">
+    <div>
+        <h1>Updater Settings</h1>
+        <p class="muted">Manage AMP credentials and modpack profiles stored in local SQLite.</p>
+    </div>
+</section>
+
+<section class="settings-grid">
+    <article class="panel">
+        <h2>Runtime Scheduler</h2>
+        <p class="muted">Live scheduler behavior stored in SQLite.</p>
+        <form asp-action="SaveRuntime" method="post" class="form-grid">
+            <div asp-validation-summary="All" class="validation"></div>
+            <label class="check wide">
+                <input asp-for="Runtime.RunOnStartup" name="RunOnStartup" />
+                <span>Run profiles on startup by default</span>
+            </label>
+            <label class="check wide">
+                <input asp-for="Runtime.ExitAfterStartupRun" name="ExitAfterStartupRun" />
+                <span>Exit after startup run</span>
+            </label>
+            <div>
+                <label asp-for="Runtime.LoopDelaySeconds">Loop Delay Seconds</label>
+                <input asp-for="Runtime.LoopDelaySeconds" name="LoopDelaySeconds" type="number" min="5" max="3600" />
+            </div>
+            <div>
+                <label asp-for="Runtime.ScheduleTimeZone">Schedule Time Zone</label>
+                <input asp-for="Runtime.ScheduleTimeZone" name="ScheduleTimeZone" placeholder="America/New_York" />
+            </div>
+            <div class="wide actions">
+                <button type="submit" class="primary">Save Runtime</button>
+            </div>
+        </form>
+    </article>
+
+    <article class="panel">
+        <h2>AMP Controller Settings</h2>
+        <p class="muted">Used by profiles with restart mode <code>amp</code> and an AMP instance name.</p>
+        <form asp-action="SaveAmpController" method="post" class="form-grid">
+            <div asp-validation-summary="All" class="validation"></div>
+            <label class="check wide">
+                <input asp-for="AmpController.Enabled" name="Enabled" />
+                <span>Enabled</span>
+            </label>
+            <div>
+                <label asp-for="AmpController.ControllerApiUrl">Controller API URL</label>
+                <input asp-for="AmpController.ControllerApiUrl" name="ControllerApiUrl" placeholder="http://127.0.0.1:8080" />
+            </div>
+            <div>
+                <label asp-for="AmpController.Username">Username</label>
+                <input asp-for="AmpController.Username" name="Username" />
+            </div>
+            <div>
+                <label asp-for="AmpController.Password">Password</label>
+                <input asp-for="AmpController.Password" name="Password" placeholder="stored value is not shown" />
+            </div>
+            <div>
+                <label asp-for="AmpController.Token">Token</label>
+                <input asp-for="AmpController.Token" name="Token" placeholder="optional" />
+            </div>
+            <label class="check">
+                <input asp-for="AmpController.RememberMe" name="RememberMe" />
+                <span>Remember me</span>
+            </label>
+            <div class="wide actions">
+                <button type="submit" class="primary">Save AMP Controller</button>
+            </div>
+        </form>
+    </article>
+
+    <article class="panel">
+        <h2>Direct AMP API Fallback</h2>
+        <p class="muted">Used only when a profile has <code>AmpApiUrl</code> set for direct instance API mode.</p>
+        <form asp-action="SaveDirectAmp" method="post" class="form-grid">
+            <label class="check wide">
+                <input asp-for="DirectAmpApi.Enabled" name="Enabled" />
+                <span>Enabled</span>
+            </label>
+            <div>
+                <label asp-for="DirectAmpApi.Username">Username</label>
+                <input asp-for="DirectAmpApi.Username" name="Username" />
+            </div>
+            <div>
+                <label asp-for="DirectAmpApi.Password">Password</label>
+                <input asp-for="DirectAmpApi.Password" name="Password" placeholder="stored value is not shown" />
+            </div>
+            <div>
+                <label asp-for="DirectAmpApi.Token">Token</label>
+                <input asp-for="DirectAmpApi.Token" name="Token" placeholder="optional" />
+            </div>
+            <label class="check">
+                <input asp-for="DirectAmpApi.RememberMe" name="RememberMe" />
+                <span>Remember me</span>
+            </label>
+            <div class="wide">
+                <label asp-for="DirectAmpApi.WarningMessageTemplate">Warning Message Template</label>
+                <textarea asp-for="DirectAmpApi.WarningMessageTemplate" name="WarningMessageTemplate" rows="3"></textarea>
+            </div>
+            <div class="wide actions">
+                <button type="submit" class="primary">Save Direct AMP</button>
+            </div>
+        </form>
+    </article>
+
+    <article class="panel">
+        <h2>Discord Announcements</h2>
+        <p class="muted">Queued after successful non-skipped syncs for profiles with a Discord channel ID.</p>
+        <form asp-action="SaveDiscord" method="post" class="form-grid">
+            <label class="check wide">
+                <input asp-for="Discord.Enabled" name="Enabled" />
+                <span>Enabled</span>
+            </label>
+            <div class="wide">
+                <label asp-for="Discord.BotToken">Bot Token</label>
+                <input asp-for="Discord.BotToken" name="BotToken" placeholder="stored value is not shown" />
+            </div>
+            <div class="wide">
+                <label asp-for="Discord.MessageTemplate">Message Template</label>
+                <textarea asp-for="Discord.MessageTemplate" name="MessageTemplate" rows="3"></textarea>
+            </div>
+            <div class="wide actions">
+                <button type="submit" class="primary">Save Discord</button>
+            </div>
+        </form>
+        @if (Model.DiscordFailures.Count > 0)
+        {
+            <div class="compact">
+                <h2>Recent Discord Failures</h2>
+                @foreach (var failure in Model.DiscordFailures)
+                {
+                    <p class="summary">
+                        #@failure.Id @failure.ModpackName: @failure.FailureReason
+                        <br />
+                        <span class="muted">Retries: @failure.RetryCount · @failure.UpdatedUtc.ToString("u")</span>
+                    </p>
+                }
+            </div>
+        }
+    </article>
+</section>
+
+<section class="panel">
+    <h2>Add Modpack Profile</h2>
+    <partial name="_ModpackForm" model="Model.NewModpack" view-data='new ViewDataDictionary(ViewData) { ["Action"] = "CreateModpack", ["Button"] = "Create Profile" }' />
+</section>
+
+<section class="page-head compact">
+    <div>
+        <h1>Profiles</h1>
+        <p class="muted">These profiles feed the shared sync engine used by local and remote agents.</p>
+    </div>
+</section>
+
+@foreach (var profile in Model.Modpacks)
+{
+    <section class="panel profile-editor">
+        <div class="card-head">
+            <div>
+                <h2>@profile.Name</h2>
+                <p class="muted">@profile.Provider · @profile.RestartMode · @(profile.Enabled ? "Enabled" : "Disabled")</p>
+            </div>
+            <form asp-action="DeleteModpack" method="post" onsubmit="return confirm('Delete this modpack profile?');">
+                <input type="hidden" name="index" value="@profile.Id" />
+                <button type="submit" class="danger">Delete</button>
+            </form>
+        </div>
+        <partial name="_ModpackForm" model="profile" view-data='new ViewDataDictionary(ViewData) { ["Action"] = "UpdateModpack", ["Button"] = "Save Profile" }' />
+    </section>
+}

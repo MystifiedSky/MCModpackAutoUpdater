@@ -1,0 +1,13 @@
+bin/
+obj/
+.vs/
+.idea/
+out/
+*.user
+*.suo
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+mc-auto-updater-state.json
+MCAgent/scripts/deploy-targets.json

@@ -1,0 +1,4 @@
+bin/
+obj/
+!appsettings.json
+!amp-template/*.json

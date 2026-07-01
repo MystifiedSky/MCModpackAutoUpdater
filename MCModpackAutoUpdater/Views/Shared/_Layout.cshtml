@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>@ViewData["Title"] - MCModpackAutoUpdater</title>
+    <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+</head>
+<body>
+<header class="topbar">
+    <a class="brand" asp-controller="Dashboard" asp-action="Index">MCModpackAutoUpdater</a>
+    <nav>
+        @if (User.Identity?.IsAuthenticated == true)
+        {
+            <a asp-controller="Dashboard" asp-action="Index">Dashboard</a>
+            @if (User.IsInRole(UpdaterRoles.Admin))
+            {
+                <a asp-controller="Settings" asp-action="Index">Settings</a>
+                <a asp-controller="Agents" asp-action="Index">Agents</a>
+                <a asp-controller="CommandHistory" asp-action="Index">History</a>
+                <a asp-controller="Users" asp-action="Index">Users</a>
+            }
+            <form asp-controller="Account" asp-action="Logout" method="post">
+                <button type="submit">Logout @User.Identity.Name</button>
+            </form>
+        }
+    </nav>
+</header>
+<main class="shell">
+    @if (TempData["Message"] is string message)
+    {
+        <div class="notice">@message</div>
+    }
+    @RenderBody()
+</main>
+</body>
+</html>

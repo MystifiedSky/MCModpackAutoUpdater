@@ -1,0 +1,180 @@
+@model CommandHistoryIndexViewModel
+@{
+    ViewData["Title"] = "Command History";
+}
+
+<section class="page-head">
+    <div>
+        <h1>Command History</h1>
+        <p class="muted">Recent queued commands and modpack update audit records stored in SQLite.</p>
+    </div>
+</section>
+
+<section class="settings-grid">
+    <article class="panel">
+        <h2>AMP Console</h2>
+        <form asp-action="QueueAmpConsole" method="post" class="form-grid">
+            <div>
+                <label asp-for="AmpConsole.ModpackId">Modpack</label>
+                <select asp-for="AmpConsole.ModpackId" name="ModpackId" required>
+                    <option value="">Select modpack</option>
+                    @foreach (var modpack in Model.Modpacks)
+                    {
+                        <option value="@modpack.Id">@modpack.Name</option>
+                    }
+                </select>
+            </div>
+            <div class="wide">
+                <label asp-for="AmpConsole.ConsoleCommand">Command</label>
+                <input asp-for="AmpConsole.ConsoleCommand" name="ConsoleCommand" maxlength="500" required />
+            </div>
+            <div class="wide actions">
+                <button type="submit" class="primary">Queue Console Command</button>
+            </div>
+        </form>
+    </article>
+
+    <article class="panel">
+        <h2>AMP Config</h2>
+        <form asp-action="QueueAmpConfig" method="post" class="form-grid">
+            <div>
+                <label asp-for="AmpConfig.ModpackId">Modpack</label>
+                <select asp-for="AmpConfig.ModpackId" name="ModpackId" required>
+                    <option value="">Select modpack</option>
+                    @foreach (var modpack in Model.Modpacks)
+                    {
+                        <option value="@modpack.Id">@modpack.Name</option>
+                    }
+                </select>
+            </div>
+            <div>
+                <label asp-for="AmpConfig.SettingNode">Setting Node</label>
+                <input asp-for="AmpConfig.SettingNode" name="SettingNode" maxlength="250" required />
+            </div>
+            <div>
+                <label asp-for="AmpConfig.SettingValue">Setting Value</label>
+                <input asp-for="AmpConfig.SettingValue" name="SettingValue" maxlength="500" placeholder="blank reads only" />
+            </div>
+            <label class="check">
+                <input asp-for="AmpConfig.RefreshValues" name="RefreshValues" />
+                <span>Refresh values</span>
+            </label>
+            <div class="wide actions">
+                <button type="submit" class="primary">Queue Config Command</button>
+            </div>
+        </form>
+    </article>
+</section>
+
+<section class="panel">
+    <form method="get" class="form-grid">
+        <div>
+            <label for="agentId">Agent</label>
+            <select id="agentId" name="agentId">
+                <option value="">Any agent</option>
+                @foreach (var agent in Model.Agents)
+                {
+                    <option value="@agent.Id" selected="@(Model.Filters.AgentId == agent.Id)">@agent.Name</option>
+                }
+            </select>
+        </div>
+        <div>
+            <label for="modpackId">Modpack</label>
+            <select id="modpackId" name="modpackId">
+                <option value="">Any modpack</option>
+                @foreach (var modpack in Model.Modpacks)
+                {
+                    <option value="@modpack.Id" selected="@(Model.Filters.ModpackId == modpack.Id)">@modpack.Name</option>
+                }
+            </select>
+        </div>
+        <div>
+            <label for="status">Status</label>
+            <select id="status" name="status">
+                <option value="">Any status</option>
+                @foreach (var status in Model.Statuses)
+                {
+                    <option value="@status" selected="@(string.Equals(Model.Filters.Status, status, StringComparison.Ordinal))">@status</option>
+                }
+            </select>
+        </div>
+        <div>
+            <label for="commandType">Command Type</label>
+            <select id="commandType" name="commandType">
+                <option value="">Any command</option>
+                @foreach (var commandType in Model.CommandTypes)
+                {
+                    <option value="@commandType" selected="@(string.Equals(Model.Filters.CommandType, commandType, StringComparison.Ordinal))">@commandType</option>
+                }
+            </select>
+        </div>
+        <div>
+            <label for="pageSize">Page Size</label>
+            <input id="pageSize" name="pageSize" type="number" min="10" max="500" value="@Model.Filters.PageSize" />
+        </div>
+        <div class="wide actions">
+            <button type="submit" class="primary">Apply Filters</button>
+            <a class="button" asp-action="Index">Clear</a>
+        </div>
+    </form>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+            <tr>
+                <th>Created</th>
+                <th>Command</th>
+                <th>Status</th>
+                <th>Agent</th>
+                <th>Modpack</th>
+                <th>Versions</th>
+                <th>Summary</th>
+                <th></th>
+            </tr>
+            </thead>
+            <tbody>
+            @foreach (var command in Model.Commands)
+            {
+                <tr>
+                    <td>@command.CreatedUtc.ToLocalTime().ToString("g")</td>
+                    <td>
+                        <strong>#@command.Id</strong><br />
+                        <span class="muted">@command.CommandType</span><br />
+                        <span class="muted">@command.TriggerSource</span>
+                    </td>
+                    <td>@command.Status</td>
+                    <td>@command.AgentName</td>
+                    <td>@(command.ModpackName ?? "-")</td>
+                    <td>
+                        <span class="muted">From:</span> @(command.PreviousVersion ?? "-")<br />
+                        <span class="muted">Target:</span> @(command.TargetVersion ?? "-")<br />
+                        <span class="muted">Applied:</span> @(command.AppliedVersion ?? "-")
+                    </td>
+                    <td>@(command.ResultSummary ?? "-")</td>
+                    <td>
+                        @if (command.CanCancel)
+                        {
+                            <form asp-action="Cancel" asp-route-commandId="@command.Id" method="post" onsubmit="return confirm('Cancel this command?');">
+                                <button type="submit" class="danger">Cancel</button>
+                            </form>
+                        }
+                        @if (command.CanRetrySync)
+                        {
+                            <form asp-action="RetrySync" asp-route-commandId="@command.Id" method="post">
+                                <button type="submit">Retry</button>
+                            </form>
+                        }
+                        <details>
+                            <summary>JSON</summary>
+                            <p class="muted">Payload</p>
+                            <pre>@command.PayloadJson</pre>
+                            <p class="muted">Result</p>
+                            <pre>@(command.ResultPayloadJson ?? "-")</pre>
+                        </details>
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+</section>

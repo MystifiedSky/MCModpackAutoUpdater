@@ -1,0 +1,31 @@
+[
+  {
+    "UpdateStageName": "Download Linux runner",
+    "UpdateSourcePlatform": "Linux",
+    "UpdateSource": "GithubRelease",
+    "UpdateSourceArgs": "{{ReleaseRepository}}",
+    "UpdateSourceData": "{{LinuxReleaseAsset}}",
+    "UnzipUpdateSource": true,
+    "OverwriteExistingFiles": true,
+    "DeleteAfterExtract": true,
+    "SkipOnFailure": false
+  },
+  {
+    "UpdateStageName": "Download Windows runner",
+    "UpdateSourcePlatform": "Windows",
+    "UpdateSource": "GithubRelease",
+    "UpdateSourceArgs": "{{ReleaseRepository}}",
+    "UpdateSourceData": "{{WindowsReleaseAsset}}",
+    "UnzipUpdateSource": true,
+    "OverwriteExistingFiles": true,
+    "DeleteAfterExtract": true,
+    "SkipOnFailure": false
+  },
+  {
+    "UpdateStageName": "Mark Linux runner executable",
+    "UpdateSourcePlatform": "Linux",
+    "UpdateSource": "SetExecutableFlag",
+    "UpdateSourceArgs": "{{$FullBaseDir}}MCModpackAutoUpdater",
+    "SkipOnFailure": false
+  }
+]

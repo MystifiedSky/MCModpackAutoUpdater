@@ -1,0 +1,34 @@
+@model UsersIndexViewModel
+@{
+    ViewData["Title"] = "Users";
+}
+
+<section class="page-head">
+    <div>
+        <h1>Users</h1>
+        <p class="muted">Local ASP.NET Core Identity accounts for this updater instance.</p>
+    </div>
+    <a class="button primary" asp-controller="Users" asp-action="Create">Create User</a>
+</section>
+
+<section class="panel">
+    <table>
+        <thead>
+        <tr>
+            <th>User</th>
+            <th>Email</th>
+            <th>Roles</th>
+        </tr>
+        </thead>
+        <tbody>
+        @foreach (var user in Model.Users)
+        {
+            <tr>
+                <td>@user.UserName</td>
+                <td>@(user.Email ?? "")</td>
+                <td>@user.Roles</td>
+            </tr>
+        }
+        </tbody>
+    </table>
+</section>

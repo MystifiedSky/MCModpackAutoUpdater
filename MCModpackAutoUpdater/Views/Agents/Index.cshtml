@@ -1,0 +1,112 @@
+@model AgentsIndexViewModel
+@{
+    ViewData["Title"] = "Agents";
+}
+
+<section class="page-head">
+    <div>
+        <h1>Agents</h1>
+        <p class="muted">Manage local and remote machines that execute queued update commands.</p>
+    </div>
+</section>
+
+@if (!string.IsNullOrWhiteSpace(Model.GeneratedToken))
+{
+    <section class="panel">
+        <h2>Agent Token</h2>
+        <p class="muted">Store this token on the remote agent. It is shown once and only the hash is saved.</p>
+        <input value="@Model.GeneratedToken" readonly />
+    </section>
+}
+
+<section class="panel">
+    <h2>Add Remote Agent</h2>
+    <form asp-action="Create" method="post" class="form-grid">
+        <div asp-validation-summary="All" class="validation"></div>
+        <div>
+            <label asp-for="NewAgent.Name">Name</label>
+            <input asp-for="NewAgent.Name" name="Name" required />
+        </div>
+        <div>
+            <label asp-for="NewAgent.Host">Host</label>
+            <input asp-for="NewAgent.Host" name="Host" required />
+        </div>
+        <div>
+            <label asp-for="NewAgent.ApiBaseUrl">Runner API URL</label>
+            <input asp-for="NewAgent.ApiBaseUrl" name="ApiBaseUrl" placeholder="http://runner:9090" required />
+        </div>
+        <div>
+            <label asp-for="NewAgent.Platform">Platform</label>
+            <select asp-for="NewAgent.Platform" name="Platform">
+                <option value="Linux">Linux</option>
+                <option value="Windows">Windows</option>
+            </select>
+        </div>
+        <label class="check">
+            <input asp-for="NewAgent.Enabled" name="Enabled" />
+            <span>Enabled</span>
+        </label>
+        <div class="wide actions">
+            <button type="submit" class="primary">Create Agent</button>
+        </div>
+    </form>
+</section>
+
+@foreach (var agent in Model.Agents)
+{
+    <section class="panel profile-editor">
+        <div class="card-head">
+            <div>
+                <h2>@agent.Name</h2>
+                <p class="muted">@agent.ExecutionMode - @agent.Host - @(agent.Enabled ? "Enabled" : "Disabled")</p>
+            </div>
+            @if (agent.ExecutionMode == UpdaterAgentExecutionMode.Remote)
+            {
+                <form asp-action="RotateToken" method="post" onsubmit="return confirm('Rotate this remote agent token? The existing agent token will stop working.');">
+                    <input type="hidden" name="id" value="@agent.Id" />
+                    <button type="submit">Rotate Token</button>
+                </form>
+            }
+        </div>
+        <p class="muted">
+            Profiles: @agent.ProfileCount -
+            Active commands: @agent.PendingCommandCount -
+            Last seen: @(agent.LastSeenUtc?.ToLocalTime().ToString("g") ?? "never") -
+            Version: @(agent.LastReportedVersion ?? "unknown")
+        </p>
+        @if (!string.IsNullOrWhiteSpace(agent.LastReportedStatus))
+        {
+            <p class="muted">@agent.LastReportedStatus</p>
+        }
+        <form asp-action="Update" method="post" class="form-grid">
+            <input type="hidden" name="Id" value="@agent.Id" />
+            <div>
+                <label>Name</label>
+                <input name="Name" value="@agent.Name" required />
+            </div>
+            <div>
+                <label>Host</label>
+                <input name="Host" value="@agent.Host" required />
+            </div>
+            <div>
+                <label>Runner API URL</label>
+                <input name="ApiBaseUrl" value="@agent.ApiBaseUrl" required @(agent.ExecutionMode == UpdaterAgentExecutionMode.Local ? "readonly" : null) />
+            </div>
+            <div>
+                <label>Platform</label>
+                <select name="Platform">
+                    <option value="Linux" selected="@(agent.Platform == "Linux")">Linux</option>
+                    <option value="Windows" selected="@(agent.Platform == "Windows")">Windows</option>
+                </select>
+            </div>
+            <label class="check">
+                <input type="checkbox" name="Enabled" value="true" checked="@agent.Enabled" />
+                <input type="hidden" name="Enabled" value="false" />
+                <span>Enabled</span>
+            </label>
+            <div class="wide actions">
+                <button type="submit" class="primary">Save Agent</button>
+            </div>
+        </form>
+    </section>
+}
