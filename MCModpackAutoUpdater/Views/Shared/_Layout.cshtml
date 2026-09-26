@@ -17,8 +17,11 @@
             {
                 <a asp-controller="Settings" asp-action="Index">Settings</a>
                 <a asp-controller="Agents" asp-action="Index">Agents</a>
-                <a asp-controller="CommandHistory" asp-action="Index">History</a>
                 <a asp-controller="Users" asp-action="Index">Users</a>
+            }
+            @if (User.IsInRole(UpdaterRoles.Admin) || User.IsInRole(UpdaterRoles.Operator))
+            {
+                <a asp-controller="CommandHistory" asp-action="Index">History</a>
             }
             <form asp-controller="Account" asp-action="Logout" method="post">
                 <button type="submit">Logout @User.Identity.Name</button>

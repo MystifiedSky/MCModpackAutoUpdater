@@ -15,7 +15,8 @@ internal static class StandaloneSyncResultParser
         try
         {
             using var document = JsonDocument.Parse(resultPayloadJson);
-            return document.RootElement.TryGetProperty("skipped", out var skippedElement) &&
+            return document.RootElement.ValueKind == JsonValueKind.Object &&
+                   document.RootElement.TryGetProperty("skipped", out var skippedElement) &&
                    skippedElement.ValueKind == JsonValueKind.True;
         }
         catch (JsonException)
@@ -35,6 +36,7 @@ internal static class StandaloneSyncResultParser
         {
             using var document = JsonDocument.Parse(resultPayloadJson);
             var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return null;
 
             if (root.TryGetProperty("version", out var versionElement) &&
                 versionElement.ValueKind == JsonValueKind.Object &&
@@ -82,6 +84,7 @@ internal static class StandaloneSyncResultParser
         {
             using var document = JsonDocument.Parse(resultPayloadJson);
             var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return null;
 
             if (root.TryGetProperty("version", out var versionElement) &&
                 versionElement.ValueKind == JsonValueKind.Object &&

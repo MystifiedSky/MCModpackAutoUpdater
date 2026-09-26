@@ -14,6 +14,12 @@ public sealed class CommandHistoryIndexViewModel
 
     public required IReadOnlyList<string> CommandTypes { get; init; }
 
+    public int Page { get; init; }
+
+    public int TotalPages { get; init; }
+
+    public int TotalCount { get; init; }
+
     public required AmpConsoleCommandFormModel AmpConsole { get; init; }
 
     public required AmpConfigCommandFormModel AmpConfig { get; init; }
@@ -30,6 +36,8 @@ public sealed class CommandHistoryFilterModel
     public string? CommandType { get; init; }
 
     public int PageSize { get; init; } = 100;
+
+    public int Page { get; init; } = 1;
 }
 
 public sealed class CommandHistoryOptionViewModel
@@ -63,6 +71,8 @@ public sealed class CommandHistoryItemViewModel
 
     public required string AgentName { get; init; }
 
+    public string? AgentHost { get; init; }
+
     public required string CommandType { get; init; }
 
     public required string Status { get; init; }
@@ -89,7 +99,7 @@ public sealed class CommandHistoryItemViewModel
 
     public bool CanCancel { get; init; }
 
-    public bool CanRetrySync { get; init; }
+    public bool CanRetry { get; init; }
 
     public string? PayloadJson { get; init; }
 

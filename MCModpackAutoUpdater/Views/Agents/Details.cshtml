@@ -1,0 +1,181 @@
+@model AgentDetailsViewModel
+@{
+    ViewData["Title"] = "Agent Details";
+}
+
+<section class="page-head">
+    <div>
+        <h1>@Model.Agent.Name</h1>
+        <p class="muted">@Model.Agent.ExecutionMode · @Model.Agent.Host · @(Model.Agent.Enabled ? "Enabled" : "Disabled")</p>
+    </div>
+    <div class="actions">
+        <a class="button" asp-action="Index">Back to Agents</a>
+        <a class="button" asp-controller="CommandHistory" asp-action="Index" asp-route-agentId="@Model.Agent.Id">Open Command History</a>
+        @if (Model.AutoRefresh)
+        {
+            <a class="button" asp-action="Details" asp-route-id="@Model.Agent.Id" asp-route-page="@Model.Page" asp-route-pageSize="@Model.PageSize" asp-route-autoRefresh="false">Disable Auto-Refresh</a>
+        }
+        else
+        {
+            <a class="button" asp-action="Details" asp-route-id="@Model.Agent.Id" asp-route-page="@Model.Page" asp-route-pageSize="@Model.PageSize" asp-route-autoRefresh="true">Enable Auto-Refresh (15s)</a>
+        }
+    </div>
+</section>
+
+<section class="panel">
+    <dl>
+        <dt>Runner API URL</dt>
+        <dd>@Model.Agent.ApiBaseUrl</dd>
+        <dt>Platform</dt>
+        <dd>@Model.Agent.Platform</dd>
+        <dt>Profiles assigned</dt>
+        <dd>@Model.Agent.ProfileCount</dd>
+        <dt>Pending commands</dt>
+        <dd>@Model.Agent.PendingCommandCount</dd>
+        <dt>In-progress commands</dt>
+        <dd>@Model.Agent.InProgressCommandCount</dd>
+        <dt>Last seen</dt>
+        <dd>@(Model.Agent.LastSeenUtc?.ToLocalTime().ToString("g") ?? "Never")</dd>
+        <dt>Reported version</dt>
+        <dd>@(Model.Agent.LastReportedVersion ?? "Unknown")</dd>
+        <dt>Reported status</dt>
+        <dd>@(Model.Agent.LastReportedStatus ?? "No status reported")</dd>
+        <dt>Token rotated</dt>
+        <dd>@(Model.Agent.AuthTokenLastRotatedUtc?.ToLocalTime().ToString("g") ?? "Unknown")</dd>
+        <dt>Record updated</dt>
+        <dd>@Model.Agent.UpdatedUtc.ToLocalTime().ToString("g")</dd>
+        <dt>Total commands</dt>
+        <dd>@Model.TotalCount</dd>
+    </dl>
+    <p class="actions">
+        <span class="badge">Pending: @Model.TotalPending</span>
+        <span class="badge">In Progress: @Model.TotalInProgress</span>
+        <span class="badge">Completed: @Model.TotalCompleted</span>
+        <span class="badge">Failed: @Model.TotalFailed</span>
+        <span class="badge">Cancelled: @Model.TotalCancelled</span>
+    </p>
+</section>
+
+<section class="panel">
+    <h2>Queue Agent Command</h2>
+    <p class="muted">The command payload is sent as provided. The agent must support the command type.</p>
+    <form asp-action="QueueCommand" method="post" class="form-grid">
+        <input type="hidden" name="AgentNodeId" value="@Model.Agent.Id" />
+        <div>
+            <label for="CommandType">Command Type</label>
+            <input id="CommandType" name="CommandType" maxlength="100" placeholder="amp_console" required />
+        </div>
+        <div class="wide">
+            <label for="PayloadJson">Payload JSON</label>
+            <textarea id="PayloadJson" name="PayloadJson" rows="4" maxlength="20000">{}</textarea>
+        </div>
+        <div class="wide actions">
+            <button type="submit" class="primary" @(Model.Agent.Enabled ? null : "disabled")>Queue Command</button>
+        </div>
+    </form>
+</section>
+
+<section class="panel">
+    <div class="page-head compact">
+        <div>
+            <h2>Command History</h2>
+            <p class="muted">@Model.TotalCount command(s)</p>
+        </div>
+        <form asp-action="Details" method="get" class="actions">
+            <input type="hidden" name="id" value="@Model.Agent.Id" />
+            <input type="hidden" name="page" value="1" />
+            <input type="hidden" name="autoRefresh" value="@Model.AutoRefresh.ToString().ToLowerInvariant()" />
+            <label for="pageSize">Page size</label>
+            <select id="pageSize" name="pageSize">
+                @foreach (var size in new[] { 25, 50, 100, 200 })
+                {
+                    if (Model.PageSize == size)
+                    {
+                        <option value="@size" selected>@size</option>
+                    }
+                    else
+                    {
+                        <option value="@size">@size</option>
+                    }
+                }
+            </select>
+            <button type="submit">Apply</button>
+        </form>
+    </div>
+    @if (Model.Commands.Count == 0)
+    {
+        <p class="muted">No commands have been queued for this agent.</p>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table>
+                <thead>
+                <tr>
+                    <th>Created</th>
+                    <th>Command</th>
+                    <th>Status</th>
+                    <th>Result</th>
+                    <th>Payloads</th>
+                </tr>
+                </thead>
+                <tbody>
+                @foreach (var command in Model.Commands)
+                {
+                    <tr>
+                        <td>@command.CreatedUtc.ToLocalTime().ToString("g")</td>
+                        <td><strong>#@command.Id</strong><br /><span class="muted">@command.CommandType</span></td>
+                        <td>@command.Status</td>
+                        <td>
+                            @(command.ResultSummary ?? "-")
+                            @if (command.AcknowledgedUtc.HasValue)
+                            {
+                                <br /><span class="muted">Acknowledged @command.AcknowledgedUtc.Value.ToLocalTime().ToString("g")</span>
+                            }
+                            @if (command.CompletedUtc.HasValue)
+                            {
+                                <br /><span class="muted">Completed @command.CompletedUtc.Value.ToLocalTime().ToString("g")</span>
+                            }
+                        </td>
+                        <td>
+                            <details>
+                                <summary>JSON</summary>
+                                <p class="muted">Payload</p>
+                                <pre>@command.PayloadJson</pre>
+                                <p class="muted">Result</p>
+                                <pre>@(command.ResultPayloadJson ?? "-")</pre>
+                            </details>
+                        </td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (Model.TotalPages > 1)
+    {
+        <nav class="actions" aria-label="Agent command history pages">
+            @if (Model.Page > 1)
+            {
+                <a class="button" asp-action="Details" asp-route-id="@Model.Agent.Id" asp-route-page="@(Model.Page - 1)" asp-route-pageSize="@Model.PageSize" asp-route-autoRefresh="@Model.AutoRefresh">Previous</a>
+            }
+            <span class="muted">Page @Model.Page of @Model.TotalPages</span>
+            @if (Model.Page < Model.TotalPages)
+            {
+                <a class="button" asp-action="Details" asp-route-id="@Model.Agent.Id" asp-route-page="@(Model.Page + 1)" asp-route-pageSize="@Model.PageSize" asp-route-autoRefresh="@Model.AutoRefresh">Next</a>
+            }
+        </nav>
+    }
+</section>
+
+@if (Model.AutoRefresh)
+{
+    <script>
+        setInterval(function () {
+            if (!document.hidden) {
+                window.location.reload();
+            }
+        }, 15000);
+    </script>
+}

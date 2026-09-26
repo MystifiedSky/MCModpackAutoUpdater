@@ -16,13 +16,16 @@ public sealed class AgentApiClient : IAgentApiClient
     private readonly AgentOptions _options;
 
     public AgentApiClient(IOptions<AgentOptions> options)
+        : this(options, new HttpClient())
+    {
+    }
+
+    public AgentApiClient(IOptions<AgentOptions> options, HttpClient httpClient)
     {
         _options = options.Value;
-        _httpClient = new HttpClient
-        {
-            BaseAddress = new Uri(_options.ApiBaseUrl.TrimEnd('/') + "/"),
-            Timeout = TimeSpan.FromSeconds(_options.HttpTimeoutSeconds)
-        };
+        _httpClient = httpClient;
+        _httpClient.BaseAddress ??= new Uri(_options.ApiBaseUrl.TrimEnd('/') + "/");
+        _httpClient.Timeout = TimeSpan.FromSeconds(_options.HttpTimeoutSeconds);
     }
 
     public async Task<AgentHeartbeatResponse> SendHeartbeatAsync(
@@ -95,12 +98,9 @@ public sealed class AgentApiClient : IAgentApiClient
     {
         if (!response.IsSuccessStatusCode)
         {
-            var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
-            var message = string.IsNullOrWhiteSpace(responseText)
-                ? $"{(int)response.StatusCode} {response.ReasonPhrase}"
-                : $"{(int)response.StatusCode} {response.ReasonPhrase}: {responseText}";
-
-            throw new AgentApiException(response.StatusCode, message);
+            throw new AgentApiException(
+                response.StatusCode,
+                $"{(int)response.StatusCode} {response.ReasonPhrase}");
         }
 
         var content = await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);

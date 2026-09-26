@@ -29,7 +29,7 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 9.0.x
+          dotnet-version: 10.0.x
 
       - name: Restore
         run: dotnet restore ./MCModpackAutoUpdater.slnx
@@ -48,11 +48,25 @@ jobs:
           cd ./artifacts/${{ matrix.runtime }}/publish
           zip -r ../${{ matrix.asset_name }} .
 
+      - name: Publish remote agent
+        run: >
+          dotnet publish ./MCAgent/MCAgent.csproj
+          --configuration Release
+          --runtime ${{ matrix.runtime }}
+          --self-contained true
+          --output ./artifacts/${{ matrix.runtime }}/agent
+          /p:ContinuousIntegrationBuild=true
+
+      - name: Package remote agent
+        run: |
+          cd ./artifacts/${{ matrix.runtime }}/agent
+          zip -r ../mc-agent-${{ matrix.runtime }}.zip .
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: ./artifacts/${{ matrix.runtime }}/${{ matrix.asset_name }}
+          path: ./artifacts/${{ matrix.runtime }}/*.zip
           if-no-files-found: error
 
   publish-main-release:

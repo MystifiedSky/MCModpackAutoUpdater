@@ -44,21 +44,21 @@ public sealed class StandaloneAgentApiClient : IAgentApiClient
         throw new NotSupportedException("The embedded local runner does not complete remote agent commands.");
     }
 
-    public Task<AgentAmpRuntimeConfigResponse> GetAmpRuntimeConfigAsync(
+    public async Task<AgentAmpRuntimeConfigResponse> GetAmpRuntimeConfigAsync(
         int modpackId,
         CancellationToken cancellationToken)
     {
         using var scope = _serviceProvider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<UpdaterIdentityDbContext>();
-        var ampController = dbContext.UpdaterAmpControllerSettings
+        var ampController = await dbContext.UpdaterAmpControllerSettings
             .AsNoTracking()
-            .FirstOrDefault();
-        var profile = dbContext.UpdaterModpackProfiles
+            .FirstOrDefaultAsync(cancellationToken);
+        var profile = await dbContext.UpdaterModpackProfiles
             .AsNoTracking()
-            .FirstOrDefault(current => current.Id == modpackId);
-        var directAmpApi = dbContext.UpdaterDirectAmpApiSettings
+            .FirstOrDefaultAsync(current => current.Id == modpackId, cancellationToken);
+        var directAmpApi = await dbContext.UpdaterDirectAmpApiSettings
             .AsNoTracking()
-            .FirstOrDefault();
+            .FirstOrDefaultAsync(cancellationToken);
         var instanceName = profile?.AmpInstanceName?.Trim();
         var hasController = ampController is not null &&
                             ampController.Enabled &&
@@ -82,7 +82,7 @@ public sealed class StandaloneAgentApiClient : IAgentApiClient
             throw new AgentApiException(HttpStatusCode.Conflict, "Standalone AMP controller settings are incomplete.");
         }
 
-        return Task.FromResult(new AgentAmpRuntimeConfigResponse
+        return new AgentAmpRuntimeConfigResponse
         {
             ControllerApiUrl = hasController ? ampController!.ControllerApiUrl : string.Empty,
             InstanceName = hasController ? instanceName! : string.Empty,
@@ -97,7 +97,7 @@ public sealed class StandaloneAgentApiClient : IAgentApiClient
             DirectAmpApiToken = hasDirectAmpApi ? directAmpApi!.Token : string.Empty,
             DirectAmpApiRememberMe = !hasDirectAmpApi || directAmpApi!.RememberMe,
             DirectAmpApiWarningMessageTemplate = hasDirectAmpApi ? directAmpApi!.WarningMessageTemplate : string.Empty
-        });
+        };
     }
 
 }

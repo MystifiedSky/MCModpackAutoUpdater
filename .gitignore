@@ -11,3 +11,8 @@ out/
 *.sqlite-*
 mc-auto-updater-state.json
 MCAgent/scripts/deploy-targets.json
+data-protection-keys/
+**/appsettings.Local.json
+**/appsettings.*.local.json
+agent-command-state*.json
+agent-command-state*.json.tmp

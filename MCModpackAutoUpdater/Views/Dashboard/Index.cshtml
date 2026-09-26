@@ -89,6 +89,10 @@ else
                 {
                     <p class="summary">Check: @profile.LastDryRunCheckSummary</p>
                 }
+                @if (User.IsInRole(UpdaterRoles.Admin) || User.IsInRole(UpdaterRoles.Operator))
+                {
+                    <p><a asp-controller="CommandHistory" asp-action="Index" asp-route-modpackId="@profile.Id">View command history</a></p>
+                }
                 @if (canRun && profile.Enabled)
                 {
                     <div class="actions">
@@ -96,9 +100,19 @@ else
                             <button type="submit" @(profile.IsAssignedAgentEnabled ? null : "disabled")>Check</button>
                         </form>
                         <form asp-controller="Dashboard" asp-action="CheckAndQueue" asp-route-profileId="@profile.Id" method="post">
+                            <label class="check">
+                                <input type="checkbox" name="skipWarnings" value="true" />
+                                <span>Skip warnings</span>
+                            </label>
                             <button type="submit" class="primary" @(profile.IsAssignedAgentEnabled && !profile.HasActiveCommand ? null : "disabled")>Check + Queue</button>
                         </form>
                         <form asp-controller="Dashboard" asp-action="Run" asp-route-profileId="@profile.Id" method="post">
+                            <label for="requestedVersion-@profile.Id">Requested version</label>
+                            <input id="requestedVersion-@profile.Id" name="requestedVersion" maxlength="100" placeholder="Use profile default" />
+                            <label class="check">
+                                <input type="checkbox" name="skipWarnings" value="true" />
+                                <span>Skip warnings</span>
+                            </label>
                             <button type="submit" class="danger" @(profile.IsAssignedAgentEnabled && !profile.HasActiveCommand ? null : "disabled")>Force Sync</button>
                         </form>
                     </div>

@@ -1,13 +1,19 @@
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Microsoft.AspNetCore.DataProtection;
+using MCModpackAutoUpdater.Services;
 
 namespace MCModpackAutoUpdater.Data;
 
 public sealed class UpdaterIdentityDbContext : IdentityDbContext<ApplicationUser>
 {
-    public UpdaterIdentityDbContext(DbContextOptions<UpdaterIdentityDbContext> options)
+    private readonly UpdaterSecretProtector _secretProtector;
+
+    public UpdaterIdentityDbContext(DbContextOptions<UpdaterIdentityDbContext> options, IDataProtectionProvider protectionProvider)
         : base(options)
     {
+        _secretProtector = new UpdaterSecretProtector(protectionProvider);
     }
 
     public DbSet<UpdaterAgentNode> UpdaterAgentNodes => Set<UpdaterAgentNode>();
@@ -28,9 +34,18 @@ public sealed class UpdaterIdentityDbContext : IdentityDbContext<ApplicationUser
 
     public DbSet<UpdaterDiscordAnnouncement> UpdaterDiscordAnnouncements => Set<UpdaterDiscordAnnouncement>();
 
+    [DbFunction("json_valid", IsBuiltIn = true)]
+    public static bool IsValidJson(string value) => throw new NotSupportedException("Use only in a database query.");
+
+    [DbFunction("json_extract", IsBuiltIn = true)]
+    public static int? ReadJsonInteger(string value, string path) => throw new NotSupportedException("Use only in a database query.");
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
+        var secretConverter = new ValueConverter<string, string>(
+            value => _secretProtector.Protect(value),
+            value => _secretProtector.Unprotect(value));
 
         builder.Entity<UpdaterAgentNode>(entity =>
         {
@@ -131,16 +146,16 @@ public sealed class UpdaterIdentityDbContext : IdentityDbContext<ApplicationUser
             entity.ToTable("UpdaterAmpControllerSettings");
             entity.Property(settings => settings.ControllerApiUrl).HasMaxLength(500);
             entity.Property(settings => settings.Username).HasMaxLength(200);
-            entity.Property(settings => settings.Password).HasMaxLength(1000);
-            entity.Property(settings => settings.Token).HasMaxLength(1000);
+            entity.Property(settings => settings.Password).HasConversion(secretConverter);
+            entity.Property(settings => settings.Token).HasConversion(secretConverter);
         });
 
         builder.Entity<UpdaterDirectAmpApiSettings>(entity =>
         {
             entity.ToTable("UpdaterDirectAmpApiSettings");
             entity.Property(settings => settings.Username).HasMaxLength(200);
-            entity.Property(settings => settings.Password).HasMaxLength(1000);
-            entity.Property(settings => settings.Token).HasMaxLength(1000);
+            entity.Property(settings => settings.Password).HasConversion(secretConverter);
+            entity.Property(settings => settings.Token).HasConversion(secretConverter);
             entity.Property(settings => settings.WarningMessageTemplate).HasMaxLength(500);
         });
 
@@ -153,7 +168,7 @@ public sealed class UpdaterIdentityDbContext : IdentityDbContext<ApplicationUser
         builder.Entity<UpdaterDiscordSettings>(entity =>
         {
             entity.ToTable("UpdaterDiscordSettings");
-            entity.Property(settings => settings.BotToken).HasMaxLength(1000);
+            entity.Property(settings => settings.BotToken).HasConversion(secretConverter);
             entity.Property(settings => settings.MessageTemplate).HasMaxLength(1000);
         });
 

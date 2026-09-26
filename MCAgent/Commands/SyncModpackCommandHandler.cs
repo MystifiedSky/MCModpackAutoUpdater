@@ -22,7 +22,6 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
 
     private const int CurseForgePublishedStatus = 4;
     private static readonly TimeSpan AmpStatePollInterval = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan AmpStateWaitTimeout = TimeSpan.FromSeconds(120);
     private static readonly TimeSpan AmpUpdatePollInterval = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan AmpUpdateWaitTimeout = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan AmpUpdateAcceptanceWaitTimeout = TimeSpan.FromSeconds(12);
@@ -86,11 +85,33 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         "datapacks",
         "global_packs"
     ];
+    private static readonly HashSet<string> KnownServerPackRootDirectories = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "mods",
+        "config",
+        "defaultconfigs",
+        "kubejs",
+        "scripts",
+        "patchouli_books",
+        "resourcepacks",
+        "shaderpacks",
+        "datapacks",
+        "global_packs",
+        "libraries",
+        "versions",
+        "world",
+        "logs",
+        "backups",
+        "crash-reports"
+    };
 
     private readonly ILogger<SyncModpackCommandHandler> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IAgentApiClient _agentApiClient;
     private readonly AgentOptions _options;
+
+    private TimeSpan AmpStateWaitTimeout => TimeSpan.FromSeconds(
+        Math.Clamp(_options.ModpackSync.AmpStateTimeoutSeconds, 30, 3600));
 
     public SyncModpackCommandHandler(
         ILogger<SyncModpackCommandHandler> logger,
@@ -124,7 +145,26 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         }
 
         var installRoot = Path.GetFullPath(installRootPath);
+        try
+        {
+            EnsurePathHasNoReparsePointComponents(installRoot, installRoot, "install root");
+        }
+        catch (InvalidOperationException exception)
+        {
+            return AgentCommandExecutionResult.Failed(exception.Message);
+        }
+
         Directory.CreateDirectory(installRoot);
+        try
+        {
+            // Recheck after creation to detect a path replaced between the
+            // first check and Directory.CreateDirectory.
+            EnsurePathHasNoReparsePointComponents(installRoot, installRoot, "install root");
+        }
+        catch (InvalidOperationException exception)
+        {
+            return AgentCommandExecutionResult.Failed(exception.Message);
+        }
 
         var requestedVersion = Normalize(payload.Options?.RequestedVersion);
         var forceFullSync = payload.Options?.ForceFullSync ?? true;
@@ -231,7 +271,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                     source = new
                     {
                         resolvedSource.SourceKind,
-                        resolvedSource.DownloadUrl,
+                        downloadUrl = SanitizeDownloadUrl(resolvedSource.DownloadUrl),
                         resolvedSource.ProjectId,
                         resolvedSource.ParentFileId,
                         resolvedSource.ServerPackFileId,
@@ -624,13 +664,9 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                                     }
                                     await ExecuteAmpStartAsync(ampApiRestartPlan, cancellationToken);
                                     restartExecution.StartCommandExecuted = true;
-                                    if (ampApiRestartPlan.IsControllerMode)
-                                    {
-                                        await WaitForAmpApplicationReadyAfterStartAsync(
-                                            ampApiRestartPlan,
-                                            cancellationToken);
-                                        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
-                                    }
+                                    await WaitForAmpApplicationReadyAfterStartAsync(
+                                        ampApiRestartPlan,
+                                        cancellationToken);
                                 }
                                 catch (Exception exception)
                                 {
@@ -747,7 +783,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                 source = new
                 {
                     resolvedSource.SourceKind,
-                    resolvedSource.DownloadUrl,
+                    downloadUrl = SanitizeDownloadUrl(resolvedSource.DownloadUrl),
                     resolvedSource.ProjectId,
                     resolvedSource.ParentFileId,
                     resolvedSource.ServerPackFileId,
@@ -3176,11 +3212,8 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
 
         if (!response.IsSuccessStatusCode)
         {
-            var responseSummary = string.IsNullOrWhiteSpace(responseBody)
-                ? $"HTTP {(int)response.StatusCode}"
-                : TruncateForLog(responseBody.Trim(), 500);
             throw new InvalidOperationException(
-                $"AMP API call ADSModule/Servers/{proxyServerKey}/API/{module}/{method} failed: {responseSummary}");
+                $"AMP API call ADSModule/Servers/{proxyServerKey}/API/{module}/{method} failed with HTTP {(int)response.StatusCode} ({response.StatusCode}).");
         }
 
         if (string.IsNullOrWhiteSpace(responseBody))
@@ -3943,6 +3976,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             };
         }
 
+        // Backward-compatible instance API mode from agent-local options.
         var ampApiOptions = _options.ModpackSync.AmpApi;
         if (!ampApiOptions.Enabled)
         {
@@ -4181,15 +4215,18 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                 method: "Stop",
                 parameters: new Dictionary<string, object?>(StringComparer.Ordinal),
                 cancellationToken);
-            return;
+        }
+        else
+        {
+            await ExecuteAmpApiMethodAsync(
+                plan,
+                module: "Core",
+                method: "Stop",
+                parameters: new Dictionary<string, object?>(StringComparer.Ordinal),
+                cancellationToken);
         }
 
-        await ExecuteAmpApiMethodAsync(
-            plan,
-            module: "Core",
-            method: "Stop",
-            parameters: new Dictionary<string, object?>(StringComparer.Ordinal),
-            cancellationToken);
+        await WaitForAmpApplicationStoppedAsync(plan, cancellationToken);
     }
 
     private async Task ExecuteAmpStartAsync(AmpApiRestartPlan plan, CancellationToken cancellationToken)
@@ -4216,38 +4253,13 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         var proxyKeys = await ResolveAmpProxyServerKeysAsync(plan, cancellationToken);
         var proxyErrors = new List<string>();
 
-        foreach (var proxyKey in proxyKeys)
+        if (await TryExecuteAmpProxyStartAsync(
+                plan,
+                proxyKeys,
+                proxyErrors,
+                cancellationToken))
         {
-            try
-            {
-                var proxySessionId = await EnsureAmpProxySessionIdAsync(plan, proxyKey, cancellationToken);
-                await ExecuteAmpProxyMethodWithResultAsync(
-                    plan,
-                    proxyKey,
-                    module: "Core",
-                    method: "Start",
-                    parameters: new Dictionary<string, object?>(StringComparer.Ordinal),
-                    proxySessionId,
-                    cancellationToken);
-                return;
-            }
-            catch (Exception exception)
-            {
-                if (await TryWaitForAmpStartAcceptanceAsync(plan, cancellationToken))
-                {
-                    _logger.LogInformation(
-                        "AMP Core/Start returned a failure for instance {InstanceName} via proxy key {ProxyKey}, but AMP reported a start transition; continuing.",
-                        plan.InstanceName,
-                        proxyKey);
-                    return;
-                }
-
-                proxyErrors.Add($"{proxyKey}: {exception.Message}");
-                _logger.LogDebug(
-                    exception,
-                    "Proxy instance start failed via key {ProxyKey}.",
-                    proxyKey);
-            }
+            return;
         }
 
         var controllerSessionId = await EnsureAmpApiSessionIdAsync(plan, cancellationToken);
@@ -4267,15 +4279,6 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             }
             catch (Exception exception)
             {
-                if (await TryWaitForAmpStartAcceptanceAsync(plan, cancellationToken))
-                {
-                    _logger.LogInformation(
-                        "AMP Core/Start returned a failure for instance {InstanceName} via controller session and proxy key {ProxyKey}, but AMP reported a start transition; continuing.",
-                        plan.InstanceName,
-                        proxyKey);
-                    return;
-                }
-
                 proxyErrors.Add($"{proxyKey} (controller-session): {exception.Message}");
                 _logger.LogDebug(
                     exception,
@@ -4284,11 +4287,150 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             }
         }
 
+        // AMP 2.8 can leave the managed instance process stopped after an
+        // application update. In that state the proxy endpoint is unavailable
+        // even though the controller itself is healthy. Start the managed
+        // instance through ADS, wait for its API to return, then retry the
+        // application start against the refreshed proxy session.
+        try
+        {
+            await ExecuteAmpControllerInstanceLifecycleAsync(
+                plan,
+                method: "StartInstance",
+                cancellationToken);
+            await WaitForAmpControllerRunningStateAsync(
+                plan,
+                expectedRunning: true,
+                cancellationToken);
+            await WaitForAmpInstanceApiAvailabilityAsync(
+                plan,
+                cancellationToken,
+                operationDescription: "controller instance start");
+
+            proxyErrors.Add("ADSModule/StartInstance fallback was required after proxy Core/Start failed.");
+            plan.ProxySessionIds.Clear();
+            var refreshedProxyKeys = await ResolveAmpProxyServerKeysAsync(plan, cancellationToken);
+            if (await TryExecuteAmpProxyStartAsync(
+                    plan,
+                    refreshedProxyKeys,
+                    proxyErrors,
+                    cancellationToken))
+            {
+                return;
+            }
+
+            if (await TryWaitForAmpApplicationStartAcceptanceAsync(plan, cancellationToken))
+            {
+                _logger.LogInformation(
+                    "AMP instance {InstanceName} reported an application start after ADSModule/StartInstance fallback.",
+                    plan.InstanceName);
+                return;
+            }
+        }
+        catch (Exception exception)
+        {
+            proxyErrors.Add($"ADSModule/StartInstance fallback: {exception.Message}");
+            _logger.LogWarning(
+                exception,
+                "AMP ADS StartInstance fallback failed for instance {InstanceName}.",
+                plan.InstanceName);
+        }
+
         var proxyErrorSummary = proxyErrors.Count == 0
             ? "No proxy keys were available."
             : string.Join(" | ", proxyErrors);
         throw new InvalidOperationException(
             $"AMP instance API Core/Start failed via proxy ({proxyErrorSummary}).");
+    }
+
+    private async Task<bool> TryExecuteAmpProxyStartAsync(
+        AmpApiRestartPlan plan,
+        IReadOnlyList<string> proxyKeys,
+        ICollection<string> errors,
+        CancellationToken cancellationToken)
+    {
+        foreach (var proxyKey in proxyKeys)
+        {
+            try
+            {
+                var proxySessionId = await EnsureAmpProxySessionIdAsync(plan, proxyKey, cancellationToken);
+                await ExecuteAmpProxyMethodWithResultAsync(
+                    plan,
+                    proxyKey,
+                    module: "Core",
+                    method: "Start",
+                    parameters: new Dictionary<string, object?>(StringComparer.Ordinal),
+                    proxySessionId,
+                    cancellationToken);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                errors.Add($"{proxyKey}: {exception.Message}");
+                _logger.LogDebug(
+                    exception,
+                    "Proxy instance start failed via key {ProxyKey}.",
+                    proxyKey);
+            }
+        }
+
+        return false;
+    }
+
+    private async Task ExecuteAmpControllerInstanceLifecycleAsync(
+        AmpApiRestartPlan plan,
+        string method,
+        CancellationToken cancellationToken)
+    {
+        if (!plan.IsControllerMode || string.IsNullOrWhiteSpace(plan.InstanceName))
+        {
+            throw new InvalidOperationException(
+                $"AMP controller lifecycle method {method} requires an instance name.");
+        }
+
+        var instanceReference = await TryResolveAmpControllerInstanceReferenceAsync(plan, cancellationToken);
+        var instanceName = instanceReference?.InstanceName ?? plan.InstanceName;
+        await ExecuteAmpApiMethodAsync(
+            plan,
+            module: "ADSModule",
+            method: method,
+            parameters: new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                // StartInstance/StopInstance are documented ADS methods and
+                // accept the managed instance name, not the proxy server key.
+                ["InstanceName"] = instanceName
+            },
+            cancellationToken);
+    }
+
+    private async Task<bool> TryWaitForAmpApplicationStartAcceptanceAsync(
+        AmpApiRestartPlan plan,
+        CancellationToken cancellationToken)
+    {
+        if (!plan.IsControllerMode)
+        {
+            return false;
+        }
+
+        var timeoutAt = DateTime.UtcNow + AmpStartAcceptanceWaitTimeout;
+        while (DateTime.UtcNow < timeoutAt)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var (running, stateText, _) = await TryGetAmpApplicationStatusSnapshotAsync(
+                plan,
+                cancellationToken);
+            if (running == true ||
+                IsAmpStartedStateText(stateText) ||
+                IsAmpStartStateTextActive(stateText))
+            {
+                return true;
+            }
+
+            await Task.Delay(AmpStatePollInterval, cancellationToken);
+        }
+
+        return false;
     }
 
     private async Task ExecuteAmpUpdateApplicationAsync(
@@ -4347,6 +4489,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         var idlePolls = 0;
         var sawUpdateActivity = false;
         var loggedWait = false;
+        var controllerStartRequested = false;
 
         while (DateTime.UtcNow < timeoutAt)
         {
@@ -4358,6 +4501,35 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                                updateInfoState == AmpUpdateProbeState.Active;
             var instanceUnavailable = taskState == AmpUpdateProbeState.InstanceUnavailable ||
                                       updateInfoState == AmpUpdateProbeState.InstanceUnavailable;
+
+            if (instanceUnavailable && !updateActive &&
+                plan.IsControllerMode && !controllerStartRequested)
+            {
+                controllerStartRequested = true;
+                try
+                {
+                    var controllerRunning = await TryGetAmpControllerInstanceRunningAsync(
+                        plan,
+                        cancellationToken);
+                    if (controllerRunning == false)
+                    {
+                        await ExecuteAmpControllerInstanceLifecycleAsync(
+                            plan,
+                            method: "StartInstance",
+                            cancellationToken);
+                        _logger.LogWarning(
+                            "AMP instance {InstanceName} was unavailable while waiting for its application update; requested ADSModule/StartInstance.",
+                            plan.InstanceName);
+                    }
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogDebug(
+                        exception,
+                        "AMP controller start recovery was unavailable while waiting for application update on instance {InstanceName}.",
+                        plan.InstanceName);
+                }
+            }
 
             if (updateActive || instanceUnavailable)
             {
@@ -4624,38 +4796,6 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         return AmpUpdateKeywords.Any(keyword => ContainsInvariant(value, keyword));
     }
 
-    private async Task<bool> TryWaitForAmpStartAcceptanceAsync(
-        AmpApiRestartPlan plan,
-        CancellationToken cancellationToken)
-    {
-        if (!plan.IsControllerMode)
-        {
-            return false;
-        }
-
-        var timeoutAt = DateTime.UtcNow + AmpStartAcceptanceWaitTimeout;
-        while (DateTime.UtcNow < timeoutAt)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var running = await TryGetAmpControllerInstanceRunningAsync(plan, cancellationToken);
-            if (running == true)
-            {
-                return true;
-            }
-
-            var controllerStateText = await TryGetAmpControllerInstanceStateTextAsync(plan, cancellationToken);
-            if (IsAmpStartStateTextActive(controllerStateText))
-            {
-                return true;
-            }
-
-            await Task.Delay(AmpStatePollInterval, cancellationToken);
-        }
-
-        return false;
-    }
-
     private async Task<string?> TryGetAmpControllerInstanceStateTextAsync(
         AmpApiRestartPlan plan,
         CancellationToken cancellationToken)
@@ -4719,8 +4859,21 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
 
     private static bool IsAmpStartStateTextActive(string? value)
     {
-        if (TryParseAmpApplicationStateCode(value, out var stateCode) &&
-            stateCode == 5)
+        if (TryParseAmpApplicationStateCode(value, out var stateCode))
+        {
+            // AMP's application states are numeric in Core/GetStatus on many
+            // versions. Only Stopped (0) and Ready/Running (20) are settled
+            // states for our update flow. Unknown and transitional codes must
+            // never be treated as proof that startup has completed.
+            return stateCode is not (0 or 20);
+        }
+
+        if (IsAmpStoppedStateText(value) || IsAmpStopTransitionStateText(value))
+        {
+            return false;
+        }
+
+        if (ContainsInvariant(value, "not ready"))
         {
             return true;
         }
@@ -4735,32 +4888,132 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                ContainsInvariant(value, "initializ") ||
                ContainsInvariant(value, "launch") ||
                ContainsInvariant(value, "boot") ||
-               ContainsInvariant(value, "load");
+               ContainsInvariant(value, "load") ||
+               ContainsInvariant(value, "configur") ||
+               ContainsInvariant(value, "restart") ||
+               ContainsInvariant(value, "wait") ||
+               ContainsInvariant(value, "install") ||
+               ContainsInvariant(value, "updat") ||
+               ContainsInvariant(value, "sleep") ||
+               ContainsInvariant(value, "suspend") ||
+               ContainsInvariant(value, "mainten") ||
+               ContainsInvariant(value, "awaiting") ||
+               ContainsInvariant(value, "failed") ||
+               ContainsInvariant(value, "unknown") ||
+               ContainsInvariant(value, "indetermin") ||
+               ContainsInvariant(value, "undefined");
     }
 
     private static bool IsAmpStartedStateText(string? value)
     {
-        if (TryParseAmpApplicationStateCode(value, out var stateCode) &&
-            stateCode == 20)
+        if (TryParseAmpApplicationStateCode(value, out var stateCode))
         {
-            return true;
+            return stateCode == 20;
         }
 
-        return ContainsInvariant(value, "running") ||
+        if (IsAmpStoppedStateText(value) || IsAmpStopTransitionStateText(value))
+        {
+            return false;
+        }
+
+        if (ContainsInvariant(value, "not ready"))
+        {
+            return false;
+        }
+
+        return string.Equals(value?.Trim(), "ready", StringComparison.OrdinalIgnoreCase) ||
+               ContainsInvariant(value, "running") ||
                ContainsInvariant(value, "started") ||
                ContainsInvariant(value, "online") ||
                ContainsInvariant(value, "listening");
+    }
+
+    private static bool IsAmpStoppedStateText(string? value)
+    {
+        if (TryParseAmpApplicationStateCode(value, out var stateCode))
+        {
+            return stateCode == 0;
+        }
+
+        return ContainsInvariant(value, "stopped") ||
+               ContainsInvariant(value, "offline") ||
+               ContainsInvariant(value, "not running") ||
+               ContainsInvariant(value, "not started") ||
+               ContainsInvariant(value, "idle");
+    }
+
+    private static bool IsAmpStopTransitionStateText(string? value)
+    {
+        if (TryParseAmpApplicationStateCode(value, out var stateCode))
+        {
+            return stateCode is 30 or 40 or 45 or 50 or 60 or 70 or 75 or 80 or 200 or 250;
+        }
+
+        return ContainsInvariant(value, "stopping") ||
+               ContainsInvariant(value, "shutting down") ||
+               ContainsInvariant(value, "shutdown") ||
+               ContainsInvariant(value, "shut down") ||
+               ContainsInvariant(value, "terminating") ||
+               ContainsInvariant(value, "quitting") ||
+               ContainsInvariant(value, "closing");
+    }
+
+    private async Task WaitForAmpApplicationStoppedAsync(
+        AmpApiRestartPlan plan,
+        CancellationToken cancellationToken)
+    {
+        var timeoutAt = DateTime.UtcNow + AmpStateWaitTimeout;
+        bool? lastObservedRunning = null;
+        string? lastObservedStateText = null;
+        string? lastObservedError = null;
+
+        while (DateTime.UtcNow < timeoutAt)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var (running, stateText, error) = await TryGetAmpApplicationStatusSnapshotAsync(plan, cancellationToken);
+            if (running.HasValue)
+            {
+                lastObservedRunning = running;
+            }
+
+            if (!string.IsNullOrWhiteSpace(stateText))
+            {
+                lastObservedStateText = stateText;
+            }
+
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                lastObservedError = error;
+            }
+
+            var stopTransition = IsAmpStopTransitionStateText(stateText);
+            var stateStillActive = running == true ||
+                                   IsAmpStartedStateText(stateText) ||
+                                   IsAmpStartStateTextActive(stateText);
+            var stopped = !stopTransition &&
+                          !stateStillActive &&
+                          (running == false || IsAmpStoppedStateText(stateText));
+            if (stopped)
+            {
+                return;
+            }
+
+            await Task.Delay(AmpStatePollInterval, cancellationToken);
+        }
+
+        var observedText = !string.IsNullOrWhiteSpace(lastObservedStateText)
+            ? DescribeAmpApplicationState(lastObservedStateText)
+            : lastObservedRunning.HasValue
+                ? (lastObservedRunning.Value ? "running" : "state transition not confirmed")
+                : lastObservedError ?? "unknown";
+        throw new InvalidOperationException(
+            $"AMP instance '{plan.InstanceName ?? "(direct)"}' did not confirm that the application stopped within {AmpStateWaitTimeout.TotalSeconds:0} seconds. Last observed state: {observedText}. Modpack files were left unchanged; inspect the server before retrying.");
     }
 
     private async Task WaitForAmpApplicationReadyAfterStartAsync(
         AmpApiRestartPlan plan,
         CancellationToken cancellationToken)
     {
-        if (!plan.IsControllerMode)
-        {
-            return;
-        }
-
         var timeoutAt = DateTime.UtcNow + AmpStateWaitTimeout;
         bool? lastObservedRunning = null;
         string? lastObservedStateText = null;
@@ -4800,16 +5053,11 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                 lastObservedControllerStateText = controllerStateText;
             }
 
-            var appStarted = running == true || IsAmpStartedStateText(stateText);
+            var appExplicitlyStopped = running == false || IsAmpStoppedStateText(stateText);
+            var appStarted = !appExplicitlyStopped &&
+                             (running == true || IsAmpStartedStateText(stateText));
             var appStillStarting = IsAmpStartStateTextActive(stateText);
             if (appStarted && !appStillStarting)
-            {
-                return;
-            }
-
-            var controllerStarted = controllerRunning == true &&
-                                    !IsAmpStartStateTextActive(controllerStateText);
-            if (controllerStarted && !appStillStarting)
             {
                 return;
             }
@@ -4828,7 +5076,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                 ? (lastObservedControllerRunning.Value ? "running" : "stopped")
                 : "unknown";
         throw new InvalidOperationException(
-            $"AMP instance '{plan.InstanceName}' did not finish application start. Last observed app state: {observedText}. Last observed controller state: {observedControllerText}.");
+            $"AMP instance '{plan.InstanceName ?? "(direct)"}' did not confirm that the application started within {AmpStateWaitTimeout.TotalSeconds:0} seconds. Last observed app state: {observedText}. Last observed controller state: {observedControllerText}.");
     }
 
     private async Task WaitForAmpApplicationIdleBeforeStartAsync(
@@ -4836,11 +5084,6 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         CancellationToken cancellationToken,
         string operationDescription)
     {
-        if (!plan.IsControllerMode)
-        {
-            return;
-        }
-
         var timeoutAt = DateTime.UtcNow + AmpStateWaitTimeout;
         bool? lastControllerRunning = null;
         string? lastControllerStateText = null;
@@ -4881,11 +5124,15 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                 lastAppError = appError;
             }
 
-            var hasAppSignal = appRunning.HasValue || !string.IsNullOrWhiteSpace(appStateText);
-            var controllerActive = controllerRunning == true || IsAmpStartStateTextActive(controllerStateText);
-            var appActive = appRunning == true || IsAmpStartStateTextActive(appStateText);
-            if ((hasAppSignal && !appActive) ||
-                (!hasAppSignal && !controllerActive))
+            var appActive = appRunning == true ||
+                            IsAmpStartedStateText(appStateText) ||
+                            IsAmpStartStateTextActive(appStateText) ||
+                            IsAmpStopTransitionStateText(appStateText);
+            var appStopped = !appActive &&
+                             (appRunning == false || IsAmpStoppedStateText(appStateText));
+            var controllerStopped = !appActive &&
+                                    (controllerRunning == false || IsAmpStoppedStateText(controllerStateText));
+            if (appStopped || controllerStopped)
             {
                 return;
             }
@@ -4923,22 +5170,19 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
 
             var stateText = TryFindStringByPropertyNames(
                 statusElement,
-                "DisplayState",
-                "displayState",
-                "Description",
-                "description",
                 "State",
                 "state",
+                "ApplicationState",
+                "applicationState",
                 "CurrentState",
                 "currentState",
-                "Status",
-                "status",
-                "InstanceState",
-                "instanceState",
                 "AppState",
                 "appState",
-                "ApplicationState",
-                "applicationState");
+                "InstanceState",
+                "instanceState") ??
+                TryFindStringByPropertyNames(statusElement, "DisplayState", "displayState") ??
+                TryFindStringByPropertyNames(statusElement, "Description", "description") ??
+                TryFindStringByPropertyNames(statusElement, "Status", "status");
             bool? running = TryFindAmpApplicationRunningState(statusElement, out var parsedRunning)
                 ? parsedRunning
                 : null;
@@ -4989,9 +5233,25 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
 
         return stateCode switch
         {
+            0 => "0 (stopped)",
             5 => "5 (preparing to start)",
-            20 => "20 (running)",
-            _ => stateCode.ToString(CultureInfo.InvariantCulture)
+            7 => "7 (configuring)",
+            10 => "10 (starting)",
+            20 => "20 (ready/running)",
+            30 => "30 (restarting)",
+            40 => "40 (stopping)",
+            45 => "45 (preparing for sleep)",
+            50 => "50 (sleeping)",
+            60 => "60 (waiting)",
+            70 => "70 (installing)",
+            75 => "75 (updating)",
+            80 => "80 (awaiting user input)",
+            100 => "100 (failed)",
+            200 => "200 (suspended)",
+            250 => "250 (maintenance)",
+            999 => "999 (indeterminate)",
+            -1 => "-1 (undefined)",
+            _ => $"{stateCode.ToString(CultureInfo.InvariantCulture)} (unknown)"
         };
     }
 
@@ -5023,7 +5283,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             {
                 lastObservedRunning = observedRunning;
                 if (observedRunning.Value == expectedRunning &&
-                    !(expectedRunning && IsAmpStartStateTextActive(observedStateText)))
+                    !(expectedRunning && IsAmpControllerStartStateTextActive(observedStateText)))
                 {
                     return;
                 }
@@ -5040,6 +5300,17 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             : "unknown";
         throw new InvalidOperationException(
             $"AMP instance '{plan.InstanceName}' did not reach expected {expectedText} state. Last observed state: {observedText}.");
+    }
+
+    private static bool IsAmpControllerStartStateTextActive(string? value)
+    {
+        // ADS instance Running is process-level state, not game-application
+        // readiness. Preserve the controller's historical textual/code-5
+        // transition handling; game readiness is checked separately through
+        // the instance Core/GetStatus response.
+        return TryParseAmpApplicationStateCode(value, out var stateCode)
+            ? stateCode == 5
+            : IsAmpStartStateTextActive(value);
     }
 
     private async Task<bool?> TryGetAmpControllerInstanceRunningAsync(
@@ -5672,6 +5943,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         var timeoutAt = DateTime.UtcNow + AmpStateWaitTimeout;
         string? lastError = null;
         plan.ProxySessionIds.Clear();
+        var controllerStartRequested = false;
 
         while (DateTime.UtcNow < timeoutAt)
         {
@@ -5684,6 +5956,37 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             }
 
             lastError = error ?? lastError;
+
+            if (!controllerStartRequested)
+            {
+                try
+                {
+                    var controllerRunning = await TryGetAmpControllerInstanceRunningAsync(
+                        plan,
+                        cancellationToken);
+                    if (controllerRunning == false)
+                    {
+                        controllerStartRequested = true;
+                        await ExecuteAmpControllerInstanceLifecycleAsync(
+                            plan,
+                            method: "StartInstance",
+                            cancellationToken);
+                        _logger.LogWarning(
+                            "AMP instance {InstanceName} was not running while waiting for its API during {OperationDescription}; requested ADSModule/StartInstance.",
+                            plan.InstanceName,
+                            operationDescription);
+                    }
+                }
+                catch (Exception exception)
+                {
+                    lastError = TruncateForLog(exception.Message, 300);
+                    _logger.LogDebug(
+                        exception,
+                        "AMP controller start recovery was unavailable while waiting for instance {InstanceName} API availability.",
+                        plan.InstanceName);
+                }
+            }
+
             plan.ProxySessionIds.Clear();
             await Task.Delay(AmpStatePollInterval, cancellationToken);
         }
@@ -5927,11 +6230,8 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
 
         if (!response.IsSuccessStatusCode)
         {
-            var responseSummary = string.IsNullOrWhiteSpace(responseBody)
-                ? $"HTTP {(int)response.StatusCode}"
-                : TruncateForLog(responseBody.Trim(), 500);
             throw new InvalidOperationException(
-                $"AMP API call {module}/{method} failed: {responseSummary}");
+                $"AMP API call {module}/{method} failed with HTTP {(int)response.StatusCode} ({response.StatusCode}).");
         }
 
         if (string.IsNullOrWhiteSpace(responseBody))
@@ -6475,6 +6775,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         string installRoot,
         IReadOnlyList<string> configuredPreservedPaths)
     {
+        EnsureNoReparsePointTree(sourceRoot, "server pack source");
         var stats = new SyncApplyStats();
 
         foreach (var sourceEntry in Directory.EnumerateFileSystemEntries(sourceRoot))
@@ -6492,13 +6793,14 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             }
 
             var targetEntry = Path.Combine(installRoot, entryName);
+            EnsurePathHasNoReparsePointComponents(installRoot, targetEntry, "sync target");
             if (File.Exists(targetEntry) || Directory.Exists(targetEntry))
             {
                 DeleteFileSystemEntry(targetEntry);
                 stats.ReplacedTopLevelEntries++;
             }
 
-            CopyFileSystemEntry(sourceEntry, targetEntry, stats);
+            CopyFileSystemEntryCore(sourceEntry, targetEntry, stats);
         }
 
         return stats;
@@ -6509,6 +6811,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         string installRoot,
         IReadOnlyList<string> configuredPreservedPaths)
     {
+        EnsureNoReparsePointTree(sourceRoot, "server pack source");
         var stats = new SyncApplyStats();
 
         foreach (var sourceEntry in Directory.EnumerateFileSystemEntries(sourceRoot))
@@ -6526,6 +6829,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             }
 
             var targetEntry = Path.Combine(installRoot, entryName);
+            EnsurePathHasNoReparsePointComponents(installRoot, targetEntry, "AMP sync target");
             if (IsAmpManagedGeneratedTopLevelPath(entryName) &&
                 (File.Exists(targetEntry) || Directory.Exists(targetEntry)))
             {
@@ -6539,11 +6843,11 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             {
                 DeleteFileSystemEntry(targetEntry);
                 stats.ReplacedTopLevelEntries++;
-                CopyFileSystemEntry(sourceEntry, targetEntry, stats);
+                CopyFileSystemEntryCore(sourceEntry, targetEntry, stats);
                 continue;
             }
 
-            CopyFileSystemEntryOverlay(sourceEntry, targetEntry, stats);
+            CopyFileSystemEntryOverlay(sourceEntry, targetEntry, installRoot, stats);
         }
 
         return stats;
@@ -6554,6 +6858,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         string installRoot,
         IReadOnlyList<string> configuredPreservedPaths)
     {
+        EnsureNoReparsePointTree(sourceRoot, "server pack source");
         var stats = new SyncApplyStats();
 
         foreach (var sourceFile in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories))
@@ -6566,6 +6871,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             }
 
             var targetFile = Path.Combine(installRoot, relativePath);
+            EnsurePathHasNoReparsePointComponents(installRoot, targetFile, "overlay target");
             Directory.CreateDirectory(Path.GetDirectoryName(targetFile)!);
             File.Copy(sourceFile, targetFile, overwrite: true);
 
@@ -6581,6 +6887,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         string installRoot,
         IReadOnlyList<string> configuredPreservedPaths)
     {
+        EnsureNoReparsePointTree(overrideRoot, "override source");
         var stats = new SyncApplyStats();
 
         foreach (var deleteMarkerFile in Directory.EnumerateFiles(overrideRoot, "*.DELETE", SearchOption.AllDirectories))
@@ -6633,6 +6940,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             }
 
             var targetFile = Path.Combine(installRoot, relativePath);
+            EnsurePathHasNoReparsePointComponents(installRoot, targetFile, "override target");
             Directory.CreateDirectory(Path.GetDirectoryName(targetFile)!);
             File.Copy(sourceFile, targetFile, overwrite: true);
 
@@ -6735,6 +7043,10 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             : Path.Combine(installRoot, directoryPart.Replace('/', Path.DirectorySeparatorChar));
         var normalizedBaseDirectory = Path.GetFullPath(baseDirectory);
         var normalizedInstallRootPath = Path.GetFullPath(installRoot);
+        EnsurePathHasNoReparsePointComponents(
+            normalizedInstallRootPath,
+            normalizedBaseDirectory,
+            "delete marker directory");
         var normalizedInstallRoot = EnsureTrailingDirectorySeparator(normalizedInstallRootPath);
         var pathComparison = OperatingSystem.IsWindows()
             ? StringComparison.OrdinalIgnoreCase
@@ -6751,6 +7063,10 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         {
             var exactTargetPath = Path.Combine(normalizedBaseDirectory, filePattern);
             var normalizedExactTargetPath = Path.GetFullPath(exactTargetPath);
+            EnsurePathHasNoReparsePointComponents(
+                normalizedInstallRootPath,
+                normalizedExactTargetPath,
+                "delete marker target");
             if (!normalizedExactTargetPath.StartsWith(normalizedInstallRoot, pathComparison) &&
                 !string.Equals(normalizedExactTargetPath, normalizedInstallRootPath, pathComparison))
             {
@@ -6791,6 +7107,10 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                 continue;
             }
 
+            EnsurePathHasNoReparsePointComponents(
+                normalizedInstallRootPath,
+                candidatePath,
+                "delete marker target");
             DeleteFileSystemEntry(candidatePath);
             deletedEntries++;
         }
@@ -6812,6 +7132,12 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
 
     private static void CopyFileSystemEntry(string sourcePath, string destinationPath, SyncApplyStats stats)
     {
+        EnsureNoReparsePointTree(sourcePath, "copy source");
+        CopyFileSystemEntryCore(sourcePath, destinationPath, stats);
+    }
+
+    private static void CopyFileSystemEntryCore(string sourcePath, string destinationPath, SyncApplyStats stats)
+    {
         if (File.Exists(sourcePath))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
@@ -6829,8 +7155,13 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         CopyDirectoryRecursive(sourcePath, destinationPath, stats);
     }
 
-    private static void CopyFileSystemEntryOverlay(string sourcePath, string destinationPath, SyncApplyStats stats)
+    private static void CopyFileSystemEntryOverlay(
+        string sourcePath,
+        string destinationPath,
+        string destinationRoot,
+        SyncApplyStats stats)
     {
+        EnsurePathHasNoReparsePointComponents(destinationRoot, destinationPath, "AMP sync target");
         if (File.Exists(sourcePath))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
@@ -6850,6 +7181,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         {
             var relativePath = Path.GetRelativePath(sourcePath, sourceFile);
             var targetFile = Path.Combine(destinationPath, relativePath);
+            EnsurePathHasNoReparsePointComponents(destinationRoot, targetFile, "AMP sync target");
             Directory.CreateDirectory(Path.GetDirectoryName(targetFile)!);
             File.Copy(sourceFile, targetFile, overwrite: true);
             stats.CopiedFiles++;
@@ -6901,6 +7233,13 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                     $"Zip entry path traversal is not allowed: {entry.FullName}");
             }
 
+            var unixFileType = (unchecked((uint)entry.ExternalAttributes) >> 16) & 0xF000;
+            if (unixFileType == 0xA000)
+            {
+                throw new InvalidOperationException(
+                    $"Symbolic links in server pack archives are not supported: {entry.FullName}");
+            }
+
             if (normalizedEntryPath.EndsWith("/", StringComparison.Ordinal))
             {
                 Directory.CreateDirectory(destinationPath);
@@ -6922,7 +7261,11 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
 
         if (files.Length == 0 && directories.Length == 1)
         {
-            return directories[0];
+            var onlyDirectoryName = Path.GetFileName(directories[0]);
+            if (!KnownServerPackRootDirectories.Contains(onlyDirectoryName))
+            {
+                return directories[0];
+            }
         }
 
         return extractedDirectory;
@@ -6961,7 +7304,102 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                 $"{fieldName} must stay within the configured root: {relativePath}");
         }
 
+        EnsurePathHasNoReparsePointComponents(fullRootPath, combinedPath, fieldName);
+
         return combinedPath;
+    }
+
+    private static void EnsurePathHasNoReparsePointComponents(
+        string rootPath,
+        string candidatePath,
+        string fieldName)
+    {
+        var fullRootPath = Path.GetFullPath(rootPath);
+        var fullCandidatePath = Path.GetFullPath(candidatePath);
+        var rootWithSeparator = EnsureTrailingDirectorySeparator(fullRootPath);
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
+        if (!fullCandidatePath.StartsWith(rootWithSeparator, comparison) &&
+            !string.Equals(fullCandidatePath, fullRootPath, comparison))
+        {
+            throw new InvalidOperationException(
+                $"{fieldName} resolves outside its configured root: {candidatePath}");
+        }
+
+        var relativePath = Path.GetRelativePath(fullRootPath, fullCandidatePath);
+
+        try
+        {
+            if ((File.GetAttributes(fullRootPath) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"{fieldName} cannot use a symbolic link or reparse point as its root: {fullRootPath}");
+            }
+        }
+        catch (FileNotFoundException)
+        {
+            // A not-yet-created root is checked again after creation, before
+            // any pack files are applied.
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // A not-yet-created root is checked again after creation, before
+            // any pack files are applied.
+        }
+
+        if (relativePath == ".")
+        {
+            return;
+        }
+
+        var currentPath = fullRootPath;
+        foreach (var segment in relativePath.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            currentPath = Path.Combine(currentPath, segment);
+            FileAttributes attributes;
+            try
+            {
+                attributes = File.GetAttributes(currentPath);
+            }
+            catch (FileNotFoundException)
+            {
+                continue;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                continue;
+            }
+
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"{fieldName} cannot pass through a symbolic link or reparse point: {currentPath}");
+            }
+        }
+    }
+
+    private static void EnsureNoReparsePointTree(string path, string fieldName)
+    {
+        var attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidOperationException(
+                $"{fieldName} cannot contain a symbolic link or reparse point: {path}");
+        }
+
+        if ((attributes & FileAttributes.Directory) == 0)
+        {
+            return;
+        }
+
+        foreach (var entry in Directory.EnumerateFileSystemEntries(path))
+        {
+            EnsureNoReparsePointTree(entry, fieldName);
+        }
     }
 
     private static void DeleteGeneratedServerPackPath(string generatedRoot, string relativePath)
@@ -7139,6 +7577,24 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         var fileName = Path.GetFileName(parsedUrl.AbsolutePath);
         return TryExtractHumanReadableVersion(fileName) ??
                ResolveDisplayVersionFromSelector(selectedVersion);
+    }
+
+    private static string? SanitizeDownloadUrl(string? downloadUrl)
+    {
+        if (!Uri.TryCreate(downloadUrl, UriKind.Absolute, out var parsedUrl) ||
+            (parsedUrl.Scheme != Uri.UriSchemeHttp && parsedUrl.Scheme != Uri.UriSchemeHttps))
+        {
+            return string.IsNullOrWhiteSpace(downloadUrl) ? null : "(invalid URL)";
+        }
+
+        var sanitizedUrl = new UriBuilder(parsedUrl)
+        {
+            UserName = string.Empty,
+            Password = string.Empty,
+            Query = string.Empty,
+            Fragment = string.Empty
+        };
+        return sanitizedUrl.Uri.AbsoluteUri;
     }
 
     private static string? ResolveDisplayVersionFromSelector(string? selectedVersion)

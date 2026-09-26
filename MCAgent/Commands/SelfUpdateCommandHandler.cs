@@ -50,11 +50,12 @@ public sealed class SelfUpdateCommandHandler : IAgentCommandHandler
         var archivePath = Path.Combine(workingRoot, $"{updateId}.zip");
         var stagingDirectory = Path.Combine(workingRoot, "staged", updateId);
         Directory.CreateDirectory(Path.GetDirectoryName(stagingDirectory)!);
+        var sanitizedPackageUrl = SanitizePackageUrl(payload.PackageUrl);
 
         _logger.LogInformation(
             "Starting self_update for command #{CommandId}. Url={PackageUrl}, Version={Version}.",
             command.Id,
-            payload.PackageUrl,
+            sanitizedPackageUrl,
             payload.Version ?? "(unspecified)");
 
         await DownloadAsync(payload.PackageUrl, archivePath, cancellationToken);
@@ -82,7 +83,7 @@ public sealed class SelfUpdateCommandHandler : IAgentCommandHandler
         {
             updateId,
             version = payload.Version,
-            packageUrl = payload.PackageUrl,
+            packageUrl = sanitizedPackageUrl,
             archivePath,
             stagingDirectory
         });
@@ -155,6 +156,23 @@ public sealed class SelfUpdateCommandHandler : IAgentCommandHandler
         }
 
         return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, workDirectory));
+    }
+
+    private static string SanitizePackageUrl(string packageUrl)
+    {
+        if (!Uri.TryCreate(packageUrl, UriKind.Absolute, out var packageUri))
+        {
+            return "(invalid URL)";
+        }
+
+        var safeUri = new UriBuilder(packageUri)
+        {
+            UserName = string.Empty,
+            Password = string.Empty,
+            Query = string.Empty,
+            Fragment = string.Empty
+        };
+        return safeUri.Uri.AbsoluteUri;
     }
 
     private static void StartDetachedShell(string command)

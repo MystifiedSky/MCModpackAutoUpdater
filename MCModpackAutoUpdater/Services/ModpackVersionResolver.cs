@@ -37,9 +37,17 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
         {
             try
             {
-                var parentFile = modpack.BuildServerPackFromClientFiles
-                    ? await ResolveCurseForgeClientFileAsync(projectId, selectedVersion, cancellationToken)
-                    : await ResolveCurseForgeParentFileAsync(projectId, selectedVersion, cancellationToken);
+                CurseForgeParentFileResolution? parentResolution = null;
+                CurseForgeFileEntry parentFile;
+                if (modpack.BuildServerPackFromClientFiles)
+                {
+                    parentFile = await ResolveCurseForgeClientFileAsync(projectId, selectedVersion, cancellationToken);
+                }
+                else
+                {
+                    parentResolution = await ResolveCurseForgeParentFileAsync(projectId, selectedVersion, cancellationToken);
+                    parentFile = parentResolution.Value.ParentFile;
+                }
 
                 if (modpack.BuildServerPackFromClientFiles)
                 {
@@ -55,7 +63,9 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
                         SelectedVersion: selectedVersion);
                 }
 
-                var serverPackFile = await ResolveCurseForgeServerPackFileAsync(projectId, parentFile.Id, cancellationToken);
+                var serverPackFile = ResolveCurseForgeServerPackFile(
+                    parentResolution!.Value.AdditionalFiles,
+                    parentFile.Id);
                 var serverPackVersion = serverPackFile.Id.ToString(CultureInfo.InvariantCulture);
                 return new ModpackVersionResolutionResult(
                     true,
@@ -68,9 +78,17 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
                     ServerPackFileId: serverPackFile.Id,
                     SelectedVersion: selectedVersion);
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
             catch (Exception exception)
             {
-                _logger.LogWarning(exception, "Failed to resolve CurseForge version for modpack {ModpackId}.", modpack.Id);
+                _logger.LogWarning(
+                    exception,
+                    "Failed to resolve CurseForge version for modpack {ModpackId} ({ModpackName}).",
+                    modpack.Id,
+                    modpack.Name);
                 return ModpackVersionResolutionResult.Failure(exception.Message);
             }
         }
@@ -89,9 +107,17 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
                     $"Resolved FTB version ID {targetVersion}.",
                     SelectedVersion: selectedVersion);
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
             catch (Exception exception)
             {
-                _logger.LogWarning(exception, "Failed to resolve FTB version for modpack {ModpackId}.", modpack.Id);
+                _logger.LogWarning(
+                    exception,
+                    "Failed to resolve FTB version for modpack {ModpackId} ({ModpackName}).",
+                    modpack.Id,
+                    modpack.Name);
                 return ModpackVersionResolutionResult.Failure(exception.Message);
             }
         }
@@ -135,7 +161,7 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
                 : "Configure CurseForge source reference or server pack URL.");
     }
 
-    private async Task<CurseForgeFileEntry> ResolveCurseForgeParentFileAsync(
+    private async Task<CurseForgeParentFileResolution> ResolveCurseForgeParentFileAsync(
         int projectId,
         string? selectedVersion,
         CancellationToken cancellationToken)
@@ -145,9 +171,10 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
         {
             foreach (var file in files)
             {
-                if (await HasDownloadableCurseForgeServerPackAsync(projectId, file, cancellationToken))
+                var additionalFiles = await GetCurseForgeAdditionalFilesAsync(projectId, file.Id, cancellationToken);
+                if (additionalFiles.Count > 0)
                 {
-                    return file;
+                    return new CurseForgeParentFileResolution(file, additionalFiles);
                 }
             }
 
@@ -158,10 +185,13 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
         if (int.TryParse(normalizedSelector, NumberStyles.Integer, CultureInfo.InvariantCulture, out var exactFileId))
         {
             var exactMatch = files.FirstOrDefault(file => file.Id == exactFileId);
-            if (exactMatch is not null &&
-                await HasDownloadableCurseForgeServerPackAsync(projectId, exactMatch, cancellationToken))
+            if (exactMatch is not null)
             {
-                return exactMatch;
+                var additionalFiles = await GetCurseForgeAdditionalFilesAsync(projectId, exactMatch.Id, cancellationToken);
+                if (additionalFiles.Count > 0)
+                {
+                    return new CurseForgeParentFileResolution(exactMatch, additionalFiles);
+                }
             }
 
             throw new InvalidOperationException($"CurseForge file ID {exactFileId} was not found or has no server pack.");
@@ -169,9 +199,10 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
 
         foreach (var file in files.Where(file => ContainsInvariant(file.DisplayName, normalizedSelector) || ContainsInvariant(file.FileName, normalizedSelector)))
         {
-            if (await HasDownloadableCurseForgeServerPackAsync(projectId, file, cancellationToken))
+            var additionalFiles = await GetCurseForgeAdditionalFilesAsync(projectId, file.Id, cancellationToken);
+            if (additionalFiles.Count > 0)
             {
-                return file;
+                return new CurseForgeParentFileResolution(file, additionalFiles);
             }
         }
 
@@ -200,12 +231,10 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
                ?? throw new InvalidOperationException($"No CurseForge client file matched selector '{normalizedSelector}'.");
     }
 
-    private async Task<CurseForgeFileEntry> ResolveCurseForgeServerPackFileAsync(
-        int projectId,
-        int parentFileId,
-        CancellationToken cancellationToken)
+    private static CurseForgeFileEntry ResolveCurseForgeServerPackFile(
+        IReadOnlyList<CurseForgeFileEntry> additionalFiles,
+        int parentFileId)
     {
-        var additionalFiles = await GetCurseForgeAdditionalFilesAsync(projectId, parentFileId, cancellationToken);
         return additionalFiles.Count == 0
             ? throw new InvalidOperationException($"No downloadable additional ZIP files were found for CurseForge file {parentFileId}.")
             : additionalFiles[0];
@@ -227,16 +256,6 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
         return files.Count == 0
             ? throw new InvalidOperationException($"No published files found for CurseForge project {projectId}.")
             : files;
-    }
-
-    private async Task<bool> HasDownloadableCurseForgeServerPackAsync(
-        int projectId,
-        CurseForgeFileEntry parentFile,
-        CancellationToken cancellationToken)
-    {
-        return parentFile.HasServerPack ||
-               parentFile.AdditionalServerPackFilesCount > 0 ||
-               (await GetCurseForgeAdditionalFilesAsync(projectId, parentFile.Id, cancellationToken)).Count > 0;
     }
 
     private async Task<List<CurseForgeFileEntry>> GetCurseForgeAdditionalFilesAsync(
@@ -500,6 +519,10 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
         public bool HasServerPack { get; set; }
         public int AdditionalServerPackFilesCount { get; set; }
     }
+
+    private readonly record struct CurseForgeParentFileResolution(
+        CurseForgeFileEntry ParentFile,
+        List<CurseForgeFileEntry> AdditionalFiles);
 
     private sealed class FtbPublicModpackResponse
     {

@@ -21,10 +21,10 @@ The app also hosts a local web UI with ASP.NET Core Identity:
 dotnet run --project MCModpackAutoUpdater/MCModpackAutoUpdater.csproj
 ```
 
-Open the configured web UI URL, default `http://localhost:9090`. On first run, check the console/AMP log for:
+Open `/setup` at the configured web UI URL, default `http://localhost:9090`. Then check the console/AMP log for:
 
 ```text
-MCModpackAutoUpdater has no users. Open /setup and use first-run setup token: ...
+MCModpackAutoUpdater first-run setup token: ...
 ```
 
 Create the first admin at `/setup`. After that:
@@ -64,6 +64,7 @@ Important fields:
 
 - `WebUi:BindUrl`: web UI bind URL, default `http://0.0.0.0:9090`.
 - `WebUi:DatabasePath`: local SQLite database used for UI users, roles, agents, profiles, commands, and audits.
+- `WebUi:DataProtectionKeyPath`: durable key directory; defaults to `data-protection-keys` beside the database. Back it up with the database to retain access to encrypted credentials.
 - `Provider`: `CurseForge`, `FTB`, or direct/custom URL mode with `ServerPackUrl`.
 - `SourceReference`: CurseForge project ID/URL or FTB pack ID/URL.
 - `CurrentVersion`: installed file/version ID. After queued syncs complete, SQLite profile state is updated from the agent result.
@@ -77,7 +78,7 @@ Important fields:
 
 ## AMP Template
 
-The `amp-template` folder contains a draft Generic Module template. It is suitable as a starting point for a private AMP configuration repository. CubeCoders currently documents that public AMPTemplates submissions must not be AI-generated, so treat this as a local/shareable draft unless you rewrite and validate it manually.
+The `amp-template` folder contains an AMP Generic Module template for hosting the web runner. Add this repository in AMP's Configuration Repositories settings and fetch the template as described in the root README.
 
 The AMP template exposes `WebUIPort` and passes it to the app as:
 

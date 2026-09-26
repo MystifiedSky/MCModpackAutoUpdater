@@ -10,6 +10,8 @@
     </div>
 </section>
 
+@if (User.IsInRole(UpdaterRoles.Admin))
+{
 <section class="settings-grid">
     <article class="panel">
         <h2>AMP Console</h2>
@@ -65,6 +67,7 @@
         </form>
     </article>
 </section>
+}
 
 <section class="panel">
     <form method="get" class="form-grid">
@@ -110,7 +113,7 @@
         </div>
         <div>
             <label for="pageSize">Page Size</label>
-            <input id="pageSize" name="pageSize" type="number" min="10" max="500" value="@Model.Filters.PageSize" />
+            <input id="pageSize" name="pageSize" type="number" min="10" max="200" value="@Model.Filters.PageSize" />
         </div>
         <div class="wide actions">
             <button type="submit" class="primary">Apply Filters</button>
@@ -118,6 +121,7 @@
         </div>
     </form>
 
+    <p class="muted">Showing page @Model.Page of @Model.TotalPages · @Model.TotalCount command(s)</p>
     <div class="table-wrap">
         <table>
             <thead>
@@ -143,7 +147,7 @@
                         <span class="muted">@command.TriggerSource</span>
                     </td>
                     <td>@command.Status</td>
-                    <td>@command.AgentName</td>
+                    <td>@command.AgentName<br /><span class="muted">@(command.AgentHost ?? "unknown host")</span></td>
                     <td>@(command.ModpackName ?? "-")</td>
                     <td>
                         <span class="muted">From:</span> @(command.PreviousVersion ?? "-")<br />
@@ -155,12 +159,24 @@
                         @if (command.CanCancel)
                         {
                             <form asp-action="Cancel" asp-route-commandId="@command.Id" method="post" onsubmit="return confirm('Cancel this command?');">
+                                <input type="hidden" name="agentId" value="@Model.Filters.AgentId" />
+                                <input type="hidden" name="modpackId" value="@Model.Filters.ModpackId" />
+                                <input type="hidden" name="status" value="@Model.Filters.Status" />
+                                <input type="hidden" name="commandType" value="@Model.Filters.CommandType" />
+                                <input type="hidden" name="page" value="@Model.Filters.Page" />
+                                <input type="hidden" name="pageSize" value="@Model.Filters.PageSize" />
                                 <button type="submit" class="danger">Cancel</button>
                             </form>
                         }
-                        @if (command.CanRetrySync)
+                        @if (command.CanRetry)
                         {
-                            <form asp-action="RetrySync" asp-route-commandId="@command.Id" method="post">
+                            <form asp-action="Retry" asp-route-commandId="@command.Id" method="post">
+                                <input type="hidden" name="agentId" value="@Model.Filters.AgentId" />
+                                <input type="hidden" name="modpackId" value="@Model.Filters.ModpackId" />
+                                <input type="hidden" name="status" value="@Model.Filters.Status" />
+                                <input type="hidden" name="commandType" value="@Model.Filters.CommandType" />
+                                <input type="hidden" name="page" value="@Model.Filters.Page" />
+                                <input type="hidden" name="pageSize" value="@Model.Filters.PageSize" />
                                 <button type="submit">Retry</button>
                             </form>
                         }
@@ -177,4 +193,18 @@
             </tbody>
         </table>
     </div>
+    @if (Model.TotalPages > 1)
+    {
+        <nav class="actions" aria-label="Command history pages">
+            @if (Model.Page > 1)
+            {
+                <a class="button" asp-action="Index" asp-route-agentId="@Model.Filters.AgentId" asp-route-modpackId="@Model.Filters.ModpackId" asp-route-status="@Model.Filters.Status" asp-route-commandType="@Model.Filters.CommandType" asp-route-page="@(Model.Page - 1)" asp-route-pageSize="@Model.Filters.PageSize">Previous</a>
+            }
+            <span class="muted">Page @Model.Page of @Model.TotalPages</span>
+            @if (Model.Page < Model.TotalPages)
+            {
+                <a class="button" asp-action="Index" asp-route-agentId="@Model.Filters.AgentId" asp-route-modpackId="@Model.Filters.ModpackId" asp-route-status="@Model.Filters.Status" asp-route-commandType="@Model.Filters.CommandType" asp-route-page="@(Model.Page + 1)" asp-route-pageSize="@Model.Filters.PageSize">Next</a>
+            }
+        </nav>
+    }
 </section>

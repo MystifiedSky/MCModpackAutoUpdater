@@ -64,6 +64,14 @@ public sealed class AccountController : Controller
             return View(model);
         }
 
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+        // Two browsers can submit the same first-run token at once. Recheck while
+        // holding SQLite's write transaction so only one first administrator wins.
+        if (await HasUsersAsync(cancellationToken))
+        {
+            return RedirectToAction(nameof(Login));
+        }
+
         var user = new ApplicationUser
         {
             UserName = model.UserName.Trim(),
@@ -76,7 +84,13 @@ public sealed class AccountController : Controller
             return View(model);
         }
 
-        await _userManager.AddToRoleAsync(user, UpdaterRoles.Admin);
+        var roleResult = await _userManager.AddToRoleAsync(user, UpdaterRoles.Admin);
+        if (!roleResult.Succeeded)
+        {
+            AddErrors(roleResult);
+            return View(model);
+        }
+        await transaction.CommitAsync(cancellationToken);
         _setupToken.Invalidate();
         await _signInManager.SignInAsync(user, isPersistent: false);
         return RedirectToAction("Index", "Dashboard");

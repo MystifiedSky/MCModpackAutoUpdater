@@ -52,6 +52,40 @@
     </form>
 </section>
 
+<section class="panel">
+    <h2>Queue Agent Command</h2>
+    <p class="muted">Send a command and JSON payload to an enabled agent. The agent must support the selected command type.</p>
+    <form asp-action="QueueCommand" method="post" class="form-grid">
+        <div>
+            <label for="AgentNodeId">Agent</label>
+            <select id="AgentNodeId" name="AgentNodeId" required>
+                @foreach (var agentOption in Model.Agents)
+                {
+                    if (agentOption.Enabled)
+                    {
+                        <option value="@agentOption.Id" selected="@(agentOption.Id == Model.NewCommand.AgentNodeId)">@agentOption.Name (@agentOption.ExecutionMode)</option>
+                    }
+                    else
+                    {
+                        <option value="@agentOption.Id" disabled="disabled">@agentOption.Name (@agentOption.ExecutionMode) - disabled</option>
+                    }
+                }
+            </select>
+        </div>
+        <div>
+            <label for="CommandType">Command Type</label>
+            <input id="CommandType" name="CommandType" maxlength="100" placeholder="amp_console" required />
+        </div>
+        <div class="wide">
+            <label for="PayloadJson">Payload JSON</label>
+            <textarea id="PayloadJson" name="PayloadJson" rows="4" maxlength="20000">{}</textarea>
+        </div>
+        <div class="wide actions">
+            <button type="submit" class="primary" @(Model.Agents.Any(agent => agent.Enabled) ? null : "disabled")>Queue Command</button>
+        </div>
+    </form>
+</section>
+
 @foreach (var agent in Model.Agents)
 {
     <section class="panel profile-editor">
@@ -60,13 +94,20 @@
                 <h2>@agent.Name</h2>
                 <p class="muted">@agent.ExecutionMode - @agent.Host - @(agent.Enabled ? "Enabled" : "Disabled")</p>
             </div>
-            @if (agent.ExecutionMode == UpdaterAgentExecutionMode.Remote)
-            {
-                <form asp-action="RotateToken" method="post" onsubmit="return confirm('Rotate this remote agent token? The existing agent token will stop working.');">
+            <div class="actions">
+                <a class="button" asp-action="Details" asp-route-id="@agent.Id">Details and History</a>
+                @if (agent.ExecutionMode == UpdaterAgentExecutionMode.Remote)
+                {
+                    <form asp-action="RotateToken" method="post" onsubmit="return confirm('Rotate this remote agent token? The existing agent token will stop working.');">
+                        <input type="hidden" name="id" value="@agent.Id" />
+                        <button type="submit">Rotate Token</button>
+                    </form>
+                }
+                <form asp-action="Delete" method="post" onsubmit="return confirm('Delete this agent, its command history, and its profile assignments?');">
                     <input type="hidden" name="id" value="@agent.Id" />
-                    <button type="submit">Rotate Token</button>
+                    <button type="submit" class="danger">Delete Agent</button>
                 </form>
-            }
+            </div>
         </div>
         <p class="muted">
             Profiles: @agent.ProfileCount -

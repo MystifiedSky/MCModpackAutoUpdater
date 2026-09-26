@@ -445,11 +445,8 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
 
         if (!response.IsSuccessStatusCode)
         {
-            var responseSummary = string.IsNullOrWhiteSpace(responseBody)
-                ? $"HTTP {(int)response.StatusCode}"
-                : TruncateForLog(responseBody.Trim(), 500);
             throw new InvalidOperationException(
-                $"AMP API call {operationName} failed: {responseSummary}");
+                $"AMP API call {operationName} failed with HTTP {(int)response.StatusCode} ({response.StatusCode}).");
         }
 
         if (string.IsNullOrWhiteSpace(responseBody))

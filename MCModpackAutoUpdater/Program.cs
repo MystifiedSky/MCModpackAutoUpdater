@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.Data.Sqlite;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using MCAgent.Commands;
@@ -12,6 +14,7 @@ using MCModpackAutoUpdater.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true);
 builder.Configuration.AddEnvironmentVariables(prefix: "MC_UPDATER__");
 builder.Configuration.AddEnvironmentVariables(prefix: "MC_AGENT__");
 
@@ -69,6 +72,16 @@ builder.Services
 var webUiOptions = new WebUiOptions();
 builder.Configuration.GetSection("WebUi").Bind(webUiOptions);
 builder.WebHost.UseUrls(webUiOptions.BindUrl);
+var keyPath = string.IsNullOrWhiteSpace(webUiOptions.DataProtectionKeyPath)
+    ? Path.Combine(Path.GetDirectoryName(ResolvePath(webUiOptions.DatabasePath))!, "data-protection-keys")
+    : ResolvePath(webUiOptions.DataProtectionKeyPath);
+var protection = builder.Services.AddDataProtection()
+    .SetApplicationName("MCModpackAutoUpdater")
+    .PersistKeysToFileSystem(new DirectoryInfo(keyPath));
+if (OperatingSystem.IsWindows())
+{
+    protection.ProtectKeysWithDpapi();
+}
 
 builder.Services.AddDbContext<UpdaterIdentityDbContext>((serviceProvider, options) =>
 {
@@ -80,7 +93,7 @@ builder.Services.AddDbContext<UpdaterIdentityDbContext>((serviceProvider, option
         Directory.CreateDirectory(directory);
     }
 
-    options.UseSqlite($"Data Source={databasePath}");
+    options.UseSqlite(new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString());
 });
 
 builder.Services
@@ -179,3 +192,5 @@ static string ResolvePath(string path)
         ? Path.GetFullPath(path)
         : Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), path));
 }
+
+public partial class Program { }

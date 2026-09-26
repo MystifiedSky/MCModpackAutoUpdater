@@ -29,9 +29,10 @@ There is also a focused agent guide at [MCAgent/README.md](MCAgent/README.md).
 
 ## Requirements
 
-- .NET 9 SDK for building and running from source.
+- .NET 10 SDK for building and running from source.
 - Network access from the runner to modpack provider APIs and download URLs.
 - File-system access from the selected agent to each Minecraft server install root.
+- A physical install-root directory: symlink/junction roots and update paths through links are rejected. Point the profile at the actual directory when using linked storage.
 - Optional: AMP credentials if using AMP restart/config orchestration.
 - Optional: Discord bot token if using update announcements.
 
@@ -97,7 +98,7 @@ MCModpackAutoUpdater/amp-template/
 http://your-amp-host:9090/setup
 ```
 
-On first start, check the AMP console or logs for the one-time setup token, then use it on `/setup` to create the first admin user.
+On first start, open `/setup`, then check the AMP console or logs for the one-time setup token and enter it to create the first admin user.
 
 The template sets these environment variables for the app:
 
@@ -106,7 +107,7 @@ MC_UPDATER__WebUi__BindUrl=http://0.0.0.0:{{WebUIPort}}
 MC_UPDATER__WebUi__DatabasePath={{WebUiDatabasePath}}
 ```
 
-Use the source-based quick start below for development, testing, or running outside AMP.
+Use the source-based quick start below for development or running outside AMP.
 
 ### Release Assets
 
@@ -117,9 +118,11 @@ This repository includes a GitHub Actions workflow that builds self-contained `l
 ```text
 mc-modpack-auto-updater-linux-x64.zip
 mc-modpack-auto-updater-win-x64.zip
+mc-agent-linux-x64.zip
+mc-agent-win-x64.zip
 ```
 
-AMP downloads the latest published release asset matching the configured platform.
+AMP downloads the latest published web runner asset matching the configured platform. These release packages include the .NET runtime, so the target machine does not need a separate .NET installation.
 
 ## Architecture
 
@@ -160,10 +163,10 @@ Open:
 http://localhost:9090/setup
 ```
 
-On first startup, the app logs a one-time setup token because no users exist yet:
+When you open `/setup` while no users exist, the app logs a one-time setup token:
 
 ```text
-MCModpackAutoUpdater has no users. Open /setup and use first-run setup token: ...
+MCModpackAutoUpdater first-run setup token: ...
 ```
 
 Use that token to create the first admin account. After the first user exists, `/setup` redirects to `/login`.
@@ -175,7 +178,7 @@ Use that token to create the first admin account. After the first user exists, `
 3. Open `/agents` and decide whether to use the built-in `Local Runner` or create a remote agent.
 4. Open `/settings` and configure runtime settings, AMP settings, Discord settings, and modpack profiles.
 5. Open `/` to check profiles, queue updates, force syncs, and watch current state.
-6. Open `/commandhistory` to inspect queued commands, results, payload JSON, retries, and cancellations.
+6. Open `/history` to inspect queued commands, results, payload JSON, retries, and cancellations.
 
 ## Configuration Sources
 
@@ -183,6 +186,7 @@ The web app reads:
 
 - `MCModpackAutoUpdater/appsettings.json`
 - `MCModpackAutoUpdater/appsettings.{Environment}.json`
+- Optional private `MCModpackAutoUpdater/appsettings.Local.json`
 - Environment variables prefixed with `MC_UPDATER__`
 - Environment variables prefixed with `MC_AGENT__` for embedded agent settings
 
@@ -190,6 +194,7 @@ The remote agent reads:
 
 - `MCAgent/appsettings.json`
 - `MCAgent/appsettings.{Environment}.json`
+- Optional private `MCAgent/appsettings.Local.json`
 - Environment variables prefixed with `MC_AGENT__`
 
 Do not commit real AMP credentials, agent tokens, Discord bot tokens, generated databases, or deployment-specific config.
@@ -499,7 +504,11 @@ The dashboard supports:
 - `Force Sync`: queue a sync even when the current version appears up to date.
 - `Disable` or `Enable`: toggle a profile.
 
-`/commandhistory` shows queued commands, audit records, payload JSON, result JSON, retry actions, cancellation for pending work, and AMP console/config command tools.
+`/history` shows paginated command and audit records, payload/result JSON, and filters for agent, profile, status, and command type. Operators have read-only access. Admins can retry finalized commands, cancel pending work, and queue AMP console/config commands. A running update cannot be cancelled by changing its database status.
+
+`/agents` also provides agent details, heartbeat information, per-agent history, and arbitrary JSON command queueing for administrators. Deletion is refused while an agent or profile has active work.
+
+The Force Sync form accepts a requested version and warning override for that run. Per-profile startup behavior can inherit the global setting or explicitly run/skip at startup.
 
 ## Publishing the Web App
 
@@ -515,6 +524,8 @@ Run:
 dotnet .\publish\web\MCModpackAutoUpdater.dll
 ```
 
+This publishing mode requires the .NET 10 ASP.NET Core Runtime on the machine that runs the web app.
+
 Set `MC_UPDATER__WebUi__DatabasePath` to a durable location before production use. Keep the database and any credential-bearing config outside source control.
 
 ## Publishing a Linux Remote Agent
@@ -524,6 +535,8 @@ Example:
 ```bash
 dotnet publish MCAgent/MCAgent.csproj -c Release -o /opt/mc-agent
 ```
+
+This publishing mode requires the .NET 10 Runtime on the agent machine.
 
 Example systemd unit:
 
@@ -564,7 +577,7 @@ Copy-Item .\MCAgent\scripts\deploy-targets.example.jsonc .\MCAgent\scripts\deplo
 .\MCAgent\scripts\deploy-agent.ps1 -ConfigPath .\MCAgent\scripts\deploy-targets.json
 ```
 
-The script publishes `MCAgent` for `linux-x64`, uploads files over SSH/SCP, syncs with `rsync --delete`, fixes ownership/permissions, restarts the service, and prints service status.
+The script publishes a framework-dependent `MCAgent` for `linux-x64`, uploads files over SSH/SCP, syncs with `rsync --delete`, fixes ownership/permissions, restarts the service, and prints service status. It verifies that the remote host has the .NET 10 Runtime before changing its files.
 
 Do not commit your real `deploy-targets.json`.
 
@@ -630,6 +643,16 @@ Verify:
 - Store real credentials in environment variables, user secrets, or private deployment config.
 - Agent tokens are shown once and stored as hashes by the runner.
 - Run agents with the least privileges required to update the target server files and restart services.
+
+AMP passwords/tokens and Discord bot tokens are encrypted in SQLite. Existing plaintext settings are upgraded on startup. Data Protection keys default to `data-protection-keys` beside the database; override this with `MC_UPDATER__WebUi__DataProtectionKeyPath`. Back up the database and key directory together and preserve their permissions. Windows keys are protected for the current OS account; moving to another account/machine may require re-entering credentials. On Linux, restrict access to the key directory to the runner account. Losing the keys makes saved secrets unreadable.
+
+Use environment variables, development user secrets, or ignored `appsettings.Local.json` for private startup configuration. Local JSON overrides are loaded before the prefixed environment variables and are excluded from publish output. Operational settings already saved through the UI remain database-backed.
+
+Run one web runner per database and one remote agent per token. Remote agents keep a durable completion journal (`Agent:CommandStatePath`, documented in the agent guide). Keep it across upgrades. If execution was interrupted without a recorded result, the command is marked failed with an inspection message; verify the server's state before retrying. Embedded local execution uses the same conservative recovery behavior with database checkpoints.
+
+Linux deployment and self-update preserve `updates/`, `state/`, `private/`, environment/local appsettings files, and default command journal names. Keep custom in-tree journals under `state/`, or list their relative paths in deployment `preservePaths` and the apply script's colon-separated `MC_AGENT_PRESERVE_PATHS`. The published `appsettings.json` remains replaceable; put credentials in private configuration or environment variables.
+
+Releases include `mc-modpack-auto-updater-{win-x64|linux-x64}.zip` for the web runner and `mc-agent-{win-x64|linux-x64}.zip` for remote agents. GitHub Actions builds these self-contained packages on Ubuntu and publishes them as the latest release.
 
 ## License
 

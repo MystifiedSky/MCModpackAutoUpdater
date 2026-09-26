@@ -5,6 +5,7 @@ using MCAgent.Services;
 
 var builder = Host.CreateApplicationBuilder(args);
 
+builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: false);
 builder.Configuration.AddEnvironmentVariables(prefix: "MC_AGENT__");
 
 builder.Services
@@ -38,6 +39,7 @@ builder.Services
     .ValidateOnStart();
 
 builder.Services.AddSingleton<AgentRuntimeState>();
+builder.Services.AddSingleton<AgentCommandCheckpointStore>();
 builder.Services.AddSingleton<IAgentApiClient, AgentApiClient>();
 builder.Services.AddSingleton<IAgentCommandHandler, NoOpCommandHandler>();
 builder.Services.AddSingleton<IAgentCommandHandler, SyncModpackCommandHandler>();

@@ -52,6 +52,64 @@ function Get-LinuxQuoted {
     return "'" + $Value.Replace("'", "'""'""'") + "'"
 }
 
+function Assert-SafeLinuxPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $normalized = $Value.TrimEnd('/')
+    if (-not $Value.StartsWith('/') -or [string]::IsNullOrWhiteSpace($normalized) -or
+        $Value -match '[\r\n\\]' -or $Value.Contains('//') -or
+        @($Value -split '/' | Where-Object { $_ -eq '.' -or $_ -eq '..' }).Count -gt 0)
+    {
+        throw "$Label must be an absolute Linux directory below / without . or .. segments."
+    }
+    return $normalized
+}
+
+function Test-PathWithin {
+    param([string]$Path, [string]$Parent)
+    return $Path -eq $Parent -or $Path.StartsWith($Parent + '/', [StringComparison]::Ordinal)
+}
+
+function Get-RsyncExcludes {
+    param($Target)
+
+    $paths = @(
+        '/updates/', '/state/', '/private/',
+        '/appsettings.*.json', '**/appsettings.*.json',
+        '/agent-command-state*.json', '**/agent-command-state*.json'
+    )
+    $additional = Get-OptionalPropertyValue -Object $Target -PropertyName 'preservePaths'
+    foreach ($path in @($additional))
+    {
+        if ($null -eq $path) { continue }
+        $value = [string]$path
+        if ([string]::IsNullOrWhiteSpace($value) -or $value.StartsWith('/') -or
+            $value -match '[\r\n*?]' -or
+            @($value -split '/' | Where-Object { $_ -eq '.' -or $_ -eq '..' }).Count -gt 0)
+        {
+            throw "Invalid preservePaths entry '$value'; use a relative path without wildcards or traversal."
+        }
+        $paths += '/' + $value.TrimEnd('/')
+    }
+    return $paths
+}
+
+function Assert-LocalWorkspacePath {
+    param([string]$Path, [string]$WorkspaceRoot)
+
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $resolvedRoot = [IO.Path]::GetFullPath($WorkspaceRoot).TrimEnd('\', '/')
+    if (-not $resolved.StartsWith($resolvedRoot + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "Refusing to delete a path outside the repository: $resolved"
+    }
+    return $resolved
+}
+
 function Invoke-External {
     param(
         [Parameter(Mandatory = $true)][string]$Tool,
@@ -144,6 +202,8 @@ $publishOutputPath = Join-Path $outRoot "mc-agent-publish"
 $deployDirectoryName = "mc-agent-deploy"
 $deployDirectoryPath = Join-Path $outRoot $deployDirectoryName
 $applyScriptSourcePath = Join-Path $scriptDirectory "apply-update-linux.sh"
+$publishOutputPath = Assert-LocalWorkspacePath -Path $publishOutputPath -WorkspaceRoot $repoRoot
+$deployDirectoryPath = Assert-LocalWorkspacePath -Path $deployDirectoryPath -WorkspaceRoot $repoRoot
 
 if (-not (Test-Path -LiteralPath $projectPath))
 {
@@ -178,6 +238,15 @@ Invoke-External -Tool "dotnet" -Arguments @(
     "-o", $publishOutputPath
 )
 
+$runtimeConfigPath = Join-Path $publishOutputPath 'MCAgent.runtimeconfig.json'
+$runtimeConfig = Get-Content -LiteralPath $runtimeConfigPath -Raw | ConvertFrom-Json
+if ($runtimeConfig.runtimeOptions.framework.name -ne 'Microsoft.NETCore.App')
+{
+    throw "Expected a framework-dependent .NET agent publish at $runtimeConfigPath."
+}
+$requiredRuntime = [Version]::Parse([string]$runtimeConfig.runtimeOptions.framework.version)
+$requiredRuntimePattern = "'^Microsoft[.]NETCore[.]App $($requiredRuntime.Major)[.]$($requiredRuntime.Minor)[.][0-9]+ '"
+
 Copy-Item -Path (Join-Path $publishOutputPath "*") -Destination $deployDirectoryPath -Recurse -Force
 if (Test-Path -LiteralPath (Join-Path $deployDirectoryPath "scripts"))
 {
@@ -205,14 +274,43 @@ foreach ($target in $config.targets)
         throw "Target '$name' is missing required properties (host, sshUser, uploadBasePath, remotePath)."
     }
 
+    $uploadBasePath = Assert-SafeLinuxPath -Value $uploadBasePath -Label "uploadBasePath for '$name'"
+    $remotePath = Assert-SafeLinuxPath -Value $remotePath -Label "remotePath for '$name'"
+    $uploadPath = $uploadBasePath + '/' + $deployDirectoryName
+    if ((Test-PathWithin -Path $uploadPath -Parent $remotePath) -or
+        (Test-PathWithin -Path $remotePath -Parent $uploadPath))
+    {
+        throw "Target '$name' upload path and remote application path must not overlap."
+    }
+    $rsyncExcludes = @(Get-RsyncExcludes -Target $target)
+    $rsyncFilterArguments = ($rsyncExcludes | ForEach-Object { '--exclude=' + (Get-LinuxQuoted $_) }) -join ' '
+    $remotePathGuard = @(
+        "remote_real=`$(realpath -m -- $(Get-LinuxQuoted $remotePath))",
+        "upload_real=`$(realpath -m -- $(Get-LinuxQuoted $uploadPath))",
+        "test `"`$remote_real`" != /",
+        "test `"`$upload_real`" != /",
+        "test `"`$remote_real`" != `"`$upload_real`"",
+        "case `"`$upload_real/`" in `"`$remote_real/`"*) exit 1 ;; esac",
+        "case `"`$remote_real/`" in `"`$upload_real/`"*) exit 1 ;; esac"
+    ) -join '; '
+
     $target.sshUser = $sshUser
     $target.host = $targetHost
-    $uploadPath = ($uploadBasePath.TrimEnd('/') + "/" + $deployDirectoryName)
 
     Write-Host "Deploying to $name ($sshUser@$targetHost)..."
 
+    try
+    {
+        Invoke-Ssh -Target $target -Command "set -euo pipefail; dotnet --list-runtimes | grep -Eq $requiredRuntimePattern"
+    }
+    catch
+    {
+        throw "Target '$name' needs the .NET $($requiredRuntime.Major).$($requiredRuntime.Minor) Runtime before deployment. $($_.Exception.Message)"
+    }
+
     $prepareCommand = @(
         "set -euo pipefail",
+        $remotePathGuard,
         "mkdir -p $(Get-LinuxQuoted $uploadBasePath)",
         "rm -rf $(Get-LinuxQuoted $uploadPath)"
     ) -join "; "
@@ -222,8 +320,9 @@ foreach ($target in $config.targets)
 
     $remoteCommands = @(
         "set -euo pipefail",
+        $remotePathGuard,
         "sudo mkdir -p $(Get-LinuxQuoted ($remotePath.TrimEnd('/') + "/scripts"))",
-        "sudo rsync -a --delete $(Get-LinuxQuoted ($uploadPath.TrimEnd('/') + '/')) $(Get-LinuxQuoted ($remotePath.TrimEnd('/') + '/'))",
+        "sudo rsync -a --delete $rsyncFilterArguments $(Get-LinuxQuoted ($uploadPath.TrimEnd('/') + '/')) $(Get-LinuxQuoted ($remotePath.TrimEnd('/') + '/'))",
         "sudo chown -R $(Get-LinuxQuoted ($serviceUser + ':' + $serviceUser)) $(Get-LinuxQuoted $remotePath)",
         "sudo chmod +x $(Get-LinuxQuoted ($remotePath.TrimEnd('/') + '/scripts/apply-update-linux.sh'))"
     )

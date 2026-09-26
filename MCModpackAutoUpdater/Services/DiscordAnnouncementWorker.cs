@@ -1,6 +1,8 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Globalization;
+using System.Net;
 using Microsoft.EntityFrameworkCore;
 using MCModpackAutoUpdater.Data;
 
@@ -46,7 +48,7 @@ public sealed class DiscordAnnouncementWorker : BackgroundService
         }
     }
 
-    private async Task SendPendingAsync(CancellationToken cancellationToken)
+    internal async Task SendPendingAsync(CancellationToken cancellationToken)
     {
         using var scope = _serviceProvider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<UpdaterIdentityDbContext>();
@@ -58,19 +60,31 @@ public sealed class DiscordAnnouncementWorker : BackgroundService
             return;
         }
 
+        var utcNow = DateTime.UtcNow;
         var announcements = await dbContext.UpdaterDiscordAnnouncements
-            .Where(announcement => announcement.Status == UpdaterDiscordAnnouncementStatus.Pending)
+            .Where(announcement => announcement.Status == UpdaterDiscordAnnouncementStatus.Pending &&
+                (announcement.NextAttemptUtc == null || announcement.NextAttemptUtc <= utcNow))
             .OrderBy(announcement => announcement.CreatedUtc)
             .Take(10)
             .ToListAsync(cancellationToken);
 
         foreach (var announcement in announcements)
         {
-            await SendOneAsync(dbContext, settings.BotToken, announcement, cancellationToken);
+            var rateLimited = await SendOneAsync(dbContext, settings.BotToken, announcement, cancellationToken);
+            if (rateLimited)
+            {
+                // Persist the pause across the whole queue, including restarts. Being
+                // conservative for a route limit also honors Discord's global limits.
+                await dbContext.UpdaterDiscordAnnouncements
+                    .Where(item => item.Status == UpdaterDiscordAnnouncementStatus.Pending &&
+                        (item.NextAttemptUtc == null || item.NextAttemptUtc < announcement.NextAttemptUtc))
+                    .ExecuteUpdateAsync(update => update.SetProperty(item => item.NextAttemptUtc, announcement.NextAttemptUtc), cancellationToken);
+                break;
+            }
         }
     }
 
-    private async Task SendOneAsync(
+    internal async Task<bool> SendOneAsync(
         UpdaterIdentityDbContext dbContext,
         string botToken,
         UpdaterDiscordAnnouncement announcement,
@@ -86,6 +100,8 @@ public sealed class DiscordAnnouncementWorker : BackgroundService
                 new
                 {
                     content = announcement.MessageContent,
+                    nonce = $"mcupdate-{announcement.Id}",
+                    enforce_nonce = true,
                     allowed_mentions = new
                     {
                         parse = Array.Empty<string>(),
@@ -97,6 +113,15 @@ public sealed class DiscordAnnouncementWorker : BackgroundService
                 cancellationToken);
 
             var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                var retryAfter = ReadRetryAfter(response, responseText);
+                announcement.NextAttemptUtc = DateTime.UtcNow.Add(retryAfter);
+                announcement.FailureReason = "Discord rate limit; delivery will resume after the requested delay.";
+                announcement.UpdatedUtc = DateTime.UtcNow;
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return true;
+            }
             if (!response.IsSuccessStatusCode)
             {
                 throw new InvalidOperationException(
@@ -109,10 +134,11 @@ public sealed class DiscordAnnouncementWorker : BackgroundService
             announcement.DiscordMessageId = TryReadDiscordMessageId(responseText);
             announcement.SentUtc = DateTime.UtcNow;
             announcement.FailureReason = null;
+            announcement.NextAttemptUtc = null;
             announcement.UpdatedUtc = DateTime.UtcNow;
             await dbContext.SaveChangesAsync(cancellationToken);
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             announcement.RetryCount++;
             announcement.Status = announcement.RetryCount >= MaxRetries
@@ -120,8 +146,31 @@ public sealed class DiscordAnnouncementWorker : BackgroundService
                 : UpdaterDiscordAnnouncementStatus.Pending;
             announcement.FailureReason = Truncate(exception.Message, 1000);
             announcement.UpdatedUtc = DateTime.UtcNow;
+            announcement.NextAttemptUtc = announcement.Status == UpdaterDiscordAnnouncementStatus.Pending
+                ? DateTime.UtcNow.AddSeconds(Math.Min(900, 15 * Math.Pow(2, announcement.RetryCount)))
+                : null;
             await dbContext.SaveChangesAsync(cancellationToken);
         }
+        return false;
+    }
+
+    internal static TimeSpan ReadRetryAfter(HttpResponseMessage response, string body)
+    {
+        var seconds = response.Headers.RetryAfter?.Delta?.TotalSeconds ??
+            (response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow)?.TotalSeconds ?? 0;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("retry_after", out var retry) &&
+                double.TryParse(retry.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && double.IsFinite(value))
+            {
+                seconds = Math.Max(seconds, value);
+            }
+        }
+        catch (JsonException) { }
+        // Invalid/missing responses still get a backoff. Never shorten a valid limit.
+        return TimeSpan.FromSeconds(seconds > 0 ? Math.Min(seconds, (DateTime.MaxValue - DateTime.UtcNow).TotalSeconds - 1) : 30);
     }
 
     private static string? TryReadDiscordMessageId(string responseText)
@@ -134,7 +183,8 @@ public sealed class DiscordAnnouncementWorker : BackgroundService
         try
         {
             using var document = JsonDocument.Parse(responseText);
-            return document.RootElement.TryGetProperty("id", out var idElement)
+            return document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("id", out var idElement) && idElement.ValueKind == JsonValueKind.String
                 ? idElement.GetString()
                 : null;
         }

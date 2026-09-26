@@ -173,18 +173,26 @@ public sealed class DashboardController : Controller
         }
 
         var queuedBy = $"{User.Identity?.Name ?? "unknown"}:check-queue";
-        await _commandService.QueueSyncCommandAsync(
-            target.Profile!,
-            target.Agent!,
-            resolution.TargetVersion,
-            target.Profile.ForceFullSync,
-            skipWarnings,
-            ignoreCurrentVersion: false,
-            queuedBy,
-            "manual:check-and-queue",
-            resolution.TargetVersion,
-            resolution.TargetVersionDisplay,
-            cancellationToken);
+        try
+        {
+            await _commandService.QueueSyncCommandAsync(
+                target.Profile!,
+                target.Agent!,
+                resolution.TargetVersion,
+                target.Profile.ForceFullSync,
+                skipWarnings,
+                ignoreCurrentVersion: false,
+                queuedBy,
+                "manual:check-and-queue",
+                resolution.TargetVersion,
+                resolution.TargetVersionDisplay,
+                cancellationToken);
+        }
+        catch (InvalidOperationException exception)
+        {
+            TempData["Message"] = exception.Message;
+            return RedirectToAction(nameof(Index));
+        }
 
         TempData["Message"] = $"Queued update for '{target.Profile.Name}' ({target.Profile.CurrentVersion} -> {resolution.TargetVersionDisplay ?? resolution.TargetVersion}).";
         return RedirectToAction(nameof(Index));
@@ -193,7 +201,11 @@ public sealed class DashboardController : Controller
     [Authorize(Roles = $"{UpdaterRoles.Admin},{UpdaterRoles.Operator}")]
     [HttpPost("/profiles/{profileId:int}/run")]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> Run(int profileId, bool skipWarnings = false, CancellationToken cancellationToken = default)
+    public async Task<IActionResult> Run(
+        int profileId,
+        string? requestedVersion,
+        bool skipWarnings = false,
+        CancellationToken cancellationToken = default)
     {
         var target = await ResolveQueueTargetAsync(profileId, cancellationToken);
         if (!target.Success)
@@ -204,18 +216,35 @@ public sealed class DashboardController : Controller
 
         var profile = target.Profile!;
         var agent = target.Agent!;
-        await _commandService.QueueSyncCommandAsync(
-            profile,
-            agent,
-            profile.RequestedVersion,
-            forceFullSync: true,
-            skipWarnings,
-            ignoreCurrentVersion: true,
-            User.Identity?.Name ?? "unknown",
-            "manual:force",
-            profile.RequestedVersion,
-            null,
-            cancellationToken);
+        var normalizedRequestedVersion = string.IsNullOrWhiteSpace(requestedVersion)
+            ? profile.RequestedVersion
+            : requestedVersion.Trim();
+        if (normalizedRequestedVersion is { Length: > 100 })
+        {
+            TempData["Message"] = "Requested version must be 100 characters or fewer.";
+            return RedirectToAction(nameof(Index));
+        }
+
+        try
+        {
+            await _commandService.QueueSyncCommandAsync(
+                profile,
+                agent,
+                normalizedRequestedVersion,
+                forceFullSync: true,
+                skipWarnings,
+                ignoreCurrentVersion: true,
+                User.Identity?.Name ?? "unknown",
+                "manual:force",
+                normalizedRequestedVersion,
+                normalizedRequestedVersion,
+                cancellationToken);
+        }
+        catch (InvalidOperationException exception)
+        {
+            TempData["Message"] = exception.Message;
+            return RedirectToAction(nameof(Index));
+        }
 
         TempData["Message"] = $"Force sync queued for '{profile.Name}'.";
         return RedirectToAction(nameof(Index));

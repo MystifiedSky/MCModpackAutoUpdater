@@ -1,0 +1,2 @@
+# Linux scripts must keep Unix line endings when published from Windows.
+*.sh text eol=lf

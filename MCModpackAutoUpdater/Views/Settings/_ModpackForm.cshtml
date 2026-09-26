@@ -64,6 +64,14 @@
         <input asp-for="ScheduleTime" placeholder="03:00" />
     </div>
     <div>
+        <label asp-for="RunOnStartup">Run On Startup</label>
+        <select asp-for="RunOnStartup">
+            <option value="">Use runtime default</option>
+            <option value="true">Run at startup</option>
+            <option value="false">Do not run at startup</option>
+        </select>
+    </div>
+    <div>
         <label asp-for="RestartMode">Restart Mode</label>
         <input asp-for="RestartMode" placeholder="amp or none" required />
     </div>

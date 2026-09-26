@@ -52,6 +52,14 @@ public sealed class AmpControllerSettingsFormModel
 {
     public bool Enabled { get; set; }
 
+    public bool HasPassword { get; set; }
+
+    public bool HasToken { get; set; }
+
+    public bool ClearPassword { get; set; }
+
+    public bool ClearToken { get; set; }
+
     [Url]
     [MaxLength(500)]
     public string? ControllerApiUrl { get; set; }
@@ -74,6 +82,14 @@ public sealed class DirectAmpApiSettingsFormModel
 {
     public bool Enabled { get; set; }
 
+    public bool HasPassword { get; set; }
+
+    public bool HasToken { get; set; }
+
+    public bool ClearPassword { get; set; }
+
+    public bool ClearToken { get; set; }
+
     [MaxLength(200)]
     public string? Username { get; set; }
 
@@ -95,6 +111,10 @@ public sealed class DirectAmpApiSettingsFormModel
 public sealed class DiscordSettingsFormModel
 {
     public bool Enabled { get; set; }
+
+    public bool HasBotToken { get; set; }
+
+    public bool ClearBotToken { get; set; }
 
     [DataType(DataType.Password)]
     [MaxLength(1000)]

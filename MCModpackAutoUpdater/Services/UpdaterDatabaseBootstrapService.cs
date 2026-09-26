@@ -34,11 +34,33 @@ public sealed class UpdaterDatabaseBootstrapService : IHostedService
         await EnsureAmpControllerSettingsAsync(dbContext, cancellationToken);
         await EnsureDirectAmpApiSettingsAsync(dbContext, cancellationToken);
         await EnsureDiscordSettingsAsync(dbContext, cancellationToken);
+        await ProtectExistingSecretsAsync(dbContext, cancellationToken);
     }
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
         return Task.CompletedTask;
+    }
+
+    private static async Task ProtectExistingSecretsAsync(UpdaterIdentityDbContext dbContext, CancellationToken cancellationToken)
+    {
+        // Legacy databases stored plaintext. Re-saving through the converters upgrades them
+        // before workers can use the settings; already protected values are read normally.
+        foreach (var settings in await dbContext.UpdaterAmpControllerSettings.ToListAsync(cancellationToken))
+        {
+            dbContext.Entry(settings).Property(s => s.Password).IsModified = true;
+            dbContext.Entry(settings).Property(s => s.Token).IsModified = true;
+        }
+        foreach (var settings in await dbContext.UpdaterDirectAmpApiSettings.ToListAsync(cancellationToken))
+        {
+            dbContext.Entry(settings).Property(s => s.Password).IsModified = true;
+            dbContext.Entry(settings).Property(s => s.Token).IsModified = true;
+        }
+        foreach (var settings in await dbContext.UpdaterDiscordSettings.ToListAsync(cancellationToken))
+        {
+            dbContext.Entry(settings).Property(s => s.BotToken).IsModified = true;
+        }
+        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     private static async Task EnsureUpdaterTablesAsync(
@@ -268,6 +290,8 @@ public sealed class UpdaterDatabaseBootstrapService : IHostedService
         await EnsureColumnAsync(dbContext, "UpdaterModpackProfiles", "LastDryRunCheckSummary", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(dbContext, "UpdaterModpackProfiles", "LastDryRunCheckTargetVersion", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(dbContext, "UpdaterModpackProfiles", "LastDryRunCheckTargetVersionDisplay", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(dbContext, "UpdaterDiscordAnnouncements", "NextAttemptUtc", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(dbContext, "UpdaterAgentCommands", "LocalExecutionResultJson", "TEXT NULL", cancellationToken);
     }
 
     private static async Task EnsureColumnAsync(
@@ -313,7 +337,14 @@ public sealed class UpdaterDatabaseBootstrapService : IHostedService
             await connection.OpenAsync(cancellationToken);
         }
 
-        await alterCommand.ExecuteNonQueryAsync(cancellationToken);
+        try
+        {
+            await alterCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally
+        {
+            if (shouldClose) await connection.CloseAsync();
+        }
     }
 
     private static async Task<UpdaterAgentNode> EnsureLocalAgentAsync(

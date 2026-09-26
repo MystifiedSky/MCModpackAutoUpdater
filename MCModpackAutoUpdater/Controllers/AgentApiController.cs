@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using MCAgent.Models.AgentApi;
@@ -7,6 +8,7 @@ using MCModpackAutoUpdater.Services;
 namespace MCModpackAutoUpdater.Controllers;
 
 [ApiController]
+[AllowAnonymous]
 [Route("api/agent")]
 public sealed class AgentApiController : ControllerBase
 {
@@ -75,6 +77,7 @@ public sealed class AgentApiController : ControllerBase
                 Id = command.Id,
                 CommandType = command.CommandType,
                 PayloadJson = command.PayloadJson,
+                Status = command.Status,
                 CreatedUtc = command.CreatedUtc
             })
             .ToListAsync(cancellationToken);
@@ -83,6 +86,7 @@ public sealed class AgentApiController : ControllerBase
     }
 
     [HttpGet("modpacks/{modpackId:int}/amp-runtime")]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
     public async Task<IActionResult> GetAmpRuntimeConfig(
         int modpackId,
         CancellationToken cancellationToken = default)
@@ -99,6 +103,12 @@ public sealed class AgentApiController : ControllerBase
         if (modpack is null || modpack.AgentNodeId != agent.Id)
         {
             return NotFound(new { error = "Modpack profile was not found for this agent." });
+        }
+
+        if (!string.Equals(modpack.RestartMode, "amp", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(modpack.RestartMode, "amp_api", StringComparison.OrdinalIgnoreCase))
+        {
+            return BadRequest(new { error = "Modpack restart mode is not AMP." });
         }
 
         var ampController = await _dbContext.UpdaterAmpControllerSettings

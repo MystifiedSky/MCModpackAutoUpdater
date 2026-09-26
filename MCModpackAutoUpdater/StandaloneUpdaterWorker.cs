@@ -31,22 +31,39 @@ public sealed class StandaloneUpdaterWorker : BackgroundService
     {
         _logger.LogInformation("MCModpackAutoUpdater starting.");
 
-        var startupRuntimeSettings = await GetRuntimeSettingsAsync(stoppingToken);
+        UpdaterRuntimeSettings startupRuntimeSettings;
+        try
+        {
+            startupRuntimeSettings = await GetRuntimeSettingsAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Could not read startup runtime settings; using configured defaults.");
+            startupRuntimeSettings = CreateRuntimeSettingsFromOptions();
+        }
+
         if (startupRuntimeSettings.ExitAfterStartupRun)
         {
-            await RunStartupChecksAsync(forceAllEnabledProfiles: true, stoppingToken);
-            _logger.LogInformation("ExitAfterStartupRun is enabled; stopping after startup checks.");
+            var commandIds = await RunStartupChecksAsync(forceAllEnabledProfiles: true, stoppingToken);
+            await WaitForStartupCommandsAsync(commandIds, stoppingToken);
+            _logger.LogInformation("ExitAfterStartupRun is enabled; startup commands have reached a final state.");
             _applicationLifetime.StopApplication();
             return;
         }
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var runtimeSettings = await GetRuntimeSettingsAsync(stoppingToken);
+            var delaySeconds = Math.Clamp(_options.CurrentValue.LoopDelaySeconds, 5, 3600);
             try
             {
+                var runtimeSettings = await GetRuntimeSettingsAsync(stoppingToken);
                 await RunStartupChecksAsync(forceAllEnabledProfiles: false, stoppingToken);
                 await RunDueScheduledChecksAsync(runtimeSettings, stoppingToken);
+                delaySeconds = Math.Clamp(runtimeSettings.LoopDelaySeconds, 5, 3600);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -57,14 +74,22 @@ public sealed class StandaloneUpdaterWorker : BackgroundService
                 _logger.LogError(exception, "Standalone updater loop failed.");
             }
 
-            var delaySeconds = Math.Clamp(runtimeSettings.LoopDelaySeconds, 5, 3600);
-            await Task.Delay(TimeSpan.FromSeconds(delaySeconds), stoppingToken);
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds), stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
         }
 
         _logger.LogInformation("MCModpackAutoUpdater stopping.");
     }
 
-    private async Task RunStartupChecksAsync(bool forceAllEnabledProfiles, CancellationToken cancellationToken)
+    internal async Task<IReadOnlyList<int>> RunStartupChecksAsync(
+        bool forceAllEnabledProfiles,
+        CancellationToken cancellationToken)
     {
         using var scope = _serviceProvider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<UpdaterIdentityDbContext>();
@@ -76,6 +101,7 @@ public sealed class StandaloneUpdaterWorker : BackgroundService
             .Where(profile => profile.Enabled)
             .OrderBy(profile => profile.Id)
             .ToListAsync(cancellationToken);
+        var commandIds = new List<int>();
 
         foreach (var profile in profiles)
         {
@@ -98,25 +124,54 @@ public sealed class StandaloneUpdaterWorker : BackgroundService
 
             if (await commandService.HasActiveSyncCommandForModpackAsync(profile.Id, cancellationToken))
             {
+                if (forceAllEnabledProfiles && profile.AgentNode is not null)
+                {
+                    commandIds.AddRange(await ReadActiveSyncCommandIdsAsync(
+                        dbContext,
+                        profile.Id,
+                        profile.AgentNode.Id,
+                        cancellationToken));
+                }
+
                 continue;
             }
 
-            await commandService.QueueSyncCommandAsync(
-                profile,
-                profile.AgentNode,
-                profile.RequestedVersion,
-                profile.ForceFullSync,
-                profile.SkipWarnings,
-                forceAllEnabledProfiles || profile.IgnoreCurrentVersion,
-                "scheduler",
-                forceAllEnabledProfiles ? "startup:exit-after-run" : "startup",
-                profile.RequestedVersion,
-                null,
-                cancellationToken);
+            try
+            {
+                var command = await commandService.QueueSyncCommandAsync(
+                    profile,
+                    profile.AgentNode,
+                    profile.RequestedVersion,
+                    profile.ForceFullSync,
+                    profile.SkipWarnings,
+                    forceAllEnabledProfiles || profile.IgnoreCurrentVersion,
+                    "scheduler",
+                    forceAllEnabledProfiles ? "startup:exit-after-run" : "startup",
+                    profile.RequestedVersion,
+                    null,
+                    cancellationToken);
+                commandIds.Add(command.Id);
+            }
+            catch (DuplicateSyncCommandException)
+            {
+                _logger.LogInformation(
+                    "Startup queue skipped for {ProfileName}; a sync command became active concurrently.",
+                    profile.Name);
+                if (forceAllEnabledProfiles && profile.AgentNode is not null)
+                {
+                    commandIds.AddRange(await ReadActiveSyncCommandIdsAsync(
+                        dbContext,
+                        profile.Id,
+                        profile.AgentNode.Id,
+                        cancellationToken));
+                }
+            }
         }
+
+        return commandIds.Distinct().ToArray();
     }
 
-    private async Task RunDueScheduledChecksAsync(
+    internal async Task RunDueScheduledChecksAsync(
         UpdaterRuntimeSettings runtimeSettings,
         CancellationToken cancellationToken)
     {
@@ -181,18 +236,27 @@ public sealed class StandaloneUpdaterWorker : BackgroundService
                 continue;
             }
 
-            await commandService.QueueSyncCommandAsync(
-                profile,
-                profile.AgentNode,
-                resolution.TargetVersion,
-                profile.ForceFullSync,
-                profile.SkipWarnings,
-                ignoreCurrentVersion: false,
-                "scheduler",
-                $"scheduler:{timeZone.Id}",
-                resolution.TargetVersion,
-                resolution.TargetVersionDisplay,
-                cancellationToken);
+            try
+            {
+                await commandService.QueueSyncCommandAsync(
+                    profile,
+                    profile.AgentNode,
+                    resolution.TargetVersion,
+                    profile.ForceFullSync,
+                    profile.SkipWarnings,
+                    ignoreCurrentVersion: false,
+                    "scheduler",
+                    $"scheduler:{timeZone.Id}",
+                    resolution.TargetVersion,
+                    resolution.TargetVersionDisplay,
+                    cancellationToken);
+            }
+            catch (DuplicateSyncCommandException)
+            {
+                _logger.LogInformation(
+                    "Scheduled queue skipped for {ProfileName}; a sync command became active concurrently.",
+                    profile.Name);
+            }
         }
     }
 
@@ -224,6 +288,11 @@ public sealed class StandaloneUpdaterWorker : BackgroundService
             return settings;
         }
 
+        return CreateRuntimeSettingsFromOptions();
+    }
+
+    private UpdaterRuntimeSettings CreateRuntimeSettingsFromOptions()
+    {
         var options = _options.CurrentValue;
         return new UpdaterRuntimeSettings
         {
@@ -234,5 +303,58 @@ public sealed class StandaloneUpdaterWorker : BackgroundService
                 ? "America/New_York"
                 : options.ScheduleTimeZone.Trim()
         };
+    }
+
+    private async Task WaitForStartupCommandsAsync(
+        IReadOnlyList<int> commandIds,
+        CancellationToken cancellationToken)
+    {
+        if (commandIds.Count == 0)
+        {
+            return;
+        }
+
+        _logger.LogInformation(
+            "Waiting for {CommandCount} startup sync command(s) to finish before exiting.",
+            commandIds.Count);
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<UpdaterIdentityDbContext>();
+            var hasActiveCommands = await dbContext.UpdaterAgentCommands
+                .AsNoTracking()
+                .AnyAsync(
+                    command =>
+                        commandIds.Contains(command.Id) &&
+                        (command.Status == UpdaterAgentCommandStatus.Pending ||
+                         command.Status == UpdaterAgentCommandStatus.InProgress),
+                    cancellationToken);
+            if (!hasActiveCommands)
+            {
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+        }
+    }
+
+    private static async Task<IReadOnlyList<int>> ReadActiveSyncCommandIdsAsync(
+        UpdaterIdentityDbContext dbContext,
+        int modpackId,
+        int agentNodeId,
+        CancellationToken cancellationToken)
+    {
+        var marker = $"\"modpack\":{{\"id\":{modpackId},";
+        return await dbContext.UpdaterAgentCommands
+            .AsNoTracking()
+            .Where(command =>
+                command.AgentNodeId == agentNodeId &&
+                command.CommandType == "sync_modpack" &&
+                (command.Status == UpdaterAgentCommandStatus.Pending ||
+                 command.Status == UpdaterAgentCommandStatus.InProgress) &&
+                EF.Functions.Like(command.PayloadJson, $"%{marker}%"))
+            .Select(command => command.Id)
+            .ToListAsync(cancellationToken);
     }
 }

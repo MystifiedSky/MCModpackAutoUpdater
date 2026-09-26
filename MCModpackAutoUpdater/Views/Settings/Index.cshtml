@@ -59,11 +59,21 @@
             <div>
                 <label asp-for="AmpController.Password">Password</label>
                 <input asp-for="AmpController.Password" name="Password" placeholder="stored value is not shown" />
+                <span class="muted">@(Model.AmpController.HasPassword ? "A password is stored." : "No password is stored.")</span>
             </div>
             <div>
                 <label asp-for="AmpController.Token">Token</label>
                 <input asp-for="AmpController.Token" name="Token" placeholder="optional" />
+                <span class="muted">@(Model.AmpController.HasToken ? "A token is stored." : "No token is stored.")</span>
             </div>
+            <label class="check">
+                <input asp-for="AmpController.ClearPassword" name="ClearPassword" />
+                <span>Clear stored password</span>
+            </label>
+            <label class="check">
+                <input asp-for="AmpController.ClearToken" name="ClearToken" />
+                <span>Clear stored token</span>
+            </label>
             <label class="check">
                 <input asp-for="AmpController.RememberMe" name="RememberMe" />
                 <span>Remember me</span>
@@ -89,11 +99,21 @@
             <div>
                 <label asp-for="DirectAmpApi.Password">Password</label>
                 <input asp-for="DirectAmpApi.Password" name="Password" placeholder="stored value is not shown" />
+                <span class="muted">@(Model.DirectAmpApi.HasPassword ? "A password is stored." : "No password is stored.")</span>
             </div>
             <div>
                 <label asp-for="DirectAmpApi.Token">Token</label>
                 <input asp-for="DirectAmpApi.Token" name="Token" placeholder="optional" />
+                <span class="muted">@(Model.DirectAmpApi.HasToken ? "A token is stored." : "No token is stored.")</span>
             </div>
+            <label class="check">
+                <input asp-for="DirectAmpApi.ClearPassword" name="ClearPassword" />
+                <span>Clear stored password</span>
+            </label>
+            <label class="check">
+                <input asp-for="DirectAmpApi.ClearToken" name="ClearToken" />
+                <span>Clear stored token</span>
+            </label>
             <label class="check">
                 <input asp-for="DirectAmpApi.RememberMe" name="RememberMe" />
                 <span>Remember me</span>
@@ -119,7 +139,12 @@
             <div class="wide">
                 <label asp-for="Discord.BotToken">Bot Token</label>
                 <input asp-for="Discord.BotToken" name="BotToken" placeholder="stored value is not shown" />
+                <span class="muted">@(Model.Discord.HasBotToken ? "A bot token is stored." : "No bot token is stored.")</span>
             </div>
+            <label class="check wide">
+                <input asp-for="Discord.ClearBotToken" name="ClearBotToken" />
+                <span>Clear stored bot token</span>
+            </label>
             <div class="wide">
                 <label asp-for="Discord.MessageTemplate">Message Template</label>
                 <textarea asp-for="Discord.MessageTemplate" name="MessageTemplate" rows="3"></textarea>

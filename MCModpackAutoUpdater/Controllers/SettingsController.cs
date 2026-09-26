@@ -18,13 +18,16 @@ public sealed class SettingsController : Controller
 {
     private readonly IOptionsMonitor<StandaloneUpdaterOptions> _updaterOptions;
     private readonly UpdaterIdentityDbContext _dbContext;
+    private readonly UpdaterCommandService _commandService;
 
     public SettingsController(
         IOptionsMonitor<StandaloneUpdaterOptions> updaterOptions,
-        UpdaterIdentityDbContext dbContext)
+        UpdaterIdentityDbContext dbContext,
+        UpdaterCommandService commandService)
     {
         _updaterOptions = updaterOptions;
         _dbContext = dbContext;
+        _commandService = commandService;
     }
 
     [HttpGet("/settings")]
@@ -67,13 +70,19 @@ public sealed class SettingsController : Controller
         AmpControllerSettingsFormModel model,
         CancellationToken cancellationToken)
     {
-        var currentUpdater = _updaterOptions.CurrentValue;
         var settings = await GetOrCreateAmpControllerSettingsAsync(cancellationToken);
+        if (model.Enabled &&
+            (!Uri.TryCreate(model.ControllerApiUrl?.Trim(), UriKind.Absolute, out var controllerApiUrl) ||
+             (controllerApiUrl.Scheme != Uri.UriSchemeHttp && controllerApiUrl.Scheme != Uri.UriSchemeHttps)))
+        {
+            ModelState.AddModelError(nameof(model.ControllerApiUrl), "AMP controller URL must be an absolute HTTP/HTTPS URL.");
+        }
+
         if (model.Enabled &&
             (string.IsNullOrWhiteSpace(model.ControllerApiUrl) ||
              string.IsNullOrWhiteSpace(model.Username) ||
-             (string.IsNullOrWhiteSpace(model.Password) &&
-              string.IsNullOrWhiteSpace(settings.Password))))
+             string.IsNullOrWhiteSpace(model.Password) &&
+             (model.ClearPassword || string.IsNullOrWhiteSpace(settings.Password))))
         {
             ModelState.AddModelError(string.Empty, "Enabled ADS controller mode requires URL, username, and password.");
         }
@@ -90,10 +99,18 @@ public sealed class SettingsController : Controller
         {
             settings.Password = model.Password;
         }
+        else if (model.ClearPassword)
+        {
+            settings.Password = string.Empty;
+        }
 
         if (!string.IsNullOrWhiteSpace(model.Token))
         {
             settings.Token = model.Token;
+        }
+        else if (model.ClearToken)
+        {
+            settings.Token = string.Empty;
         }
 
         settings.RememberMe = model.RememberMe;
@@ -112,8 +129,8 @@ public sealed class SettingsController : Controller
         var settings = await GetOrCreateDirectAmpApiSettingsAsync(cancellationToken);
         if (model.Enabled &&
             (string.IsNullOrWhiteSpace(model.Username) ||
-             (string.IsNullOrWhiteSpace(model.Password) &&
-              string.IsNullOrWhiteSpace(settings.Password))))
+             string.IsNullOrWhiteSpace(model.Password) &&
+             (model.ClearPassword || string.IsNullOrWhiteSpace(settings.Password))))
         {
             ModelState.AddModelError(string.Empty, "Enabled direct AMP mode requires username and password.");
         }
@@ -125,8 +142,12 @@ public sealed class SettingsController : Controller
 
         settings.Enabled = model.Enabled;
         settings.Username = Normalize(model.Username) ?? string.Empty;
-        settings.Password = string.IsNullOrWhiteSpace(model.Password) ? settings.Password : model.Password;
-        settings.Token = string.IsNullOrWhiteSpace(model.Token) ? settings.Token : model.Token;
+        settings.Password = !string.IsNullOrWhiteSpace(model.Password)
+            ? model.Password
+            : model.ClearPassword ? string.Empty : settings.Password;
+        settings.Token = !string.IsNullOrWhiteSpace(model.Token)
+            ? model.Token
+            : model.ClearToken ? string.Empty : settings.Token;
         settings.RememberMe = model.RememberMe;
         settings.WarningMessageTemplate = string.IsNullOrWhiteSpace(model.WarningMessageTemplate)
             ? new UpdaterDirectAmpApiSettings().WarningMessageTemplate
@@ -147,7 +168,7 @@ public sealed class SettingsController : Controller
         var settings = await GetOrCreateDiscordSettingsAsync(cancellationToken);
         if (model.Enabled &&
             string.IsNullOrWhiteSpace(model.BotToken) &&
-            string.IsNullOrWhiteSpace(settings.BotToken))
+            (model.ClearBotToken || string.IsNullOrWhiteSpace(settings.BotToken)))
         {
             ModelState.AddModelError(nameof(model.BotToken), "Enabled Discord announcements require a bot token.");
         }
@@ -161,6 +182,10 @@ public sealed class SettingsController : Controller
         if (!string.IsNullOrWhiteSpace(model.BotToken))
         {
             settings.BotToken = model.BotToken.Trim();
+        }
+        else if (model.ClearBotToken)
+        {
+            settings.BotToken = string.Empty;
         }
 
         settings.MessageTemplate = string.IsNullOrWhiteSpace(model.MessageTemplate)
@@ -185,7 +210,9 @@ public sealed class SettingsController : Controller
             ModelState.AddModelError(nameof(model.AgentNodeId), "Assigned agent is required.");
         }
 
-        if (await _dbContext.UpdaterModpackProfiles.AnyAsync(profile => profile.Name == model.Name.Trim(), cancellationToken))
+        var normalizedName = model.Name?.Trim() ?? string.Empty;
+        if (normalizedName.Length > 0 &&
+            await _dbContext.UpdaterModpackProfiles.AnyAsync(profile => profile.Name == normalizedName, cancellationToken))
         {
             ModelState.AddModelError(nameof(model.Name), "A profile with this name already exists.");
         }
@@ -220,7 +247,9 @@ public sealed class SettingsController : Controller
             ModelState.AddModelError(nameof(model.AgentNodeId), "Assigned agent is required.");
         }
 
-        if (await _dbContext.UpdaterModpackProfiles.AnyAsync(profile => profile.Id != model.Id && profile.Name == model.Name.Trim(), cancellationToken))
+        var normalizedName = model.Name?.Trim() ?? string.Empty;
+        if (normalizedName.Length > 0 &&
+            await _dbContext.UpdaterModpackProfiles.AnyAsync(profile => profile.Id != model.Id && profile.Name == normalizedName, cancellationToken))
         {
             ModelState.AddModelError(nameof(model.Name), "A profile with this name already exists.");
         }
@@ -240,6 +269,7 @@ public sealed class SettingsController : Controller
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteModpack(int index, CancellationToken cancellationToken)
     {
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
         var entity = await _dbContext.UpdaterModpackProfiles.FirstOrDefaultAsync(profile => profile.Id == index, cancellationToken);
         if (entity is null)
         {
@@ -247,9 +277,16 @@ public sealed class SettingsController : Controller
             return RedirectToAction(nameof(Index));
         }
 
+        if (await _commandService.HasActiveSyncCommandForModpackAsync(entity.Id, cancellationToken))
+        {
+            TempData["Message"] = $"Cannot delete '{entity.Name}' while a sync command is pending or running.";
+            return RedirectToAction(nameof(Index));
+        }
+
         var name = entity.Name;
         _dbContext.UpdaterModpackProfiles.Remove(entity);
         await _dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         TempData["Message"] = $"Modpack '{name}' deleted.";
         return RedirectToAction(nameof(Index));
     }
@@ -300,19 +337,24 @@ public sealed class SettingsController : Controller
                 Enabled = ampController.Enabled,
                 ControllerApiUrl = ampController.ControllerApiUrl,
                 Username = ampController.Username,
-                RememberMe = ampController.RememberMe
+                RememberMe = ampController.RememberMe,
+                HasPassword = !string.IsNullOrWhiteSpace(ampController.Password),
+                HasToken = !string.IsNullOrWhiteSpace(ampController.Token)
             },
             DirectAmpApi = new DirectAmpApiSettingsFormModel
             {
                 Enabled = ampApi.Enabled,
                 Username = ampApi.Username,
                 RememberMe = ampApi.RememberMe,
-                WarningMessageTemplate = ampApi.WarningMessageTemplate
+                WarningMessageTemplate = ampApi.WarningMessageTemplate,
+                HasPassword = !string.IsNullOrWhiteSpace(ampApi.Password),
+                HasToken = !string.IsNullOrWhiteSpace(ampApi.Token)
             },
             Discord = new DiscordSettingsFormModel
             {
                 Enabled = discord.Enabled,
-                MessageTemplate = discord.MessageTemplate
+                MessageTemplate = discord.MessageTemplate,
+                HasBotToken = !string.IsNullOrWhiteSpace(discord.BotToken)
             },
             DiscordFailures = discordFailures,
             Modpacks = profiles.Select(ToForm).ToArray(),

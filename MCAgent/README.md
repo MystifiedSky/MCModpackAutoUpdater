@@ -19,6 +19,7 @@ The agent reads config from:
 
 - `appsettings.json`
 - `appsettings.{Environment}.json`
+- optional private `appsettings.Local.json`
 - environment variables with prefix `MC_AGENT__`
 
 ### Key Settings
@@ -27,13 +28,17 @@ The agent reads config from:
 - `AuthToken` (required): raw token from the runner's `/agents` page.
 - `PollIntervalSeconds`: default poll loop delay.
 - `CommandBatchSize`: max commands fetched per poll.
+- `CommandStatePath` (optional): private local journal for runner commands. The default is a file under the current OS user's local application data directory, separated by a hash of the runner URL and agent token. An explicit absolute path is supported; a relative path is resolved from the agent application directory. Use a writable, private location and a different file for each runner/token pair.
 - `ModpackSync.RestartModes`: optional restart hook templates keyed by `restartMode` (for example `amp`).
+- `ModpackSync.AmpStateTimeoutSeconds`: maximum wait for AMP application stop/start/idle confirmation; defaults to 600 seconds and is clamped to 30–3600 seconds.
 - `ModpackSync.FailIfRestartModeUnconfigured`: fail sync when mode is unknown/misconfigured instead of continuing.
 - `ModpackSync.AmpApi.*`: optional legacy fallback credentials for direct instance API mode (`restartMode=amp` with `modpack.ampApiUrl`).
 - `SelfUpdate.Enabled`: allow/disallow `self_update` command.
 - `SelfUpdate.WorkDirectory`: where update archives/staging are stored.
 - `SelfUpdate.ApplyCommandTemplate`: optional command to apply staged update.
 - `SelfUpdate.AllowApplyCommandFromPayload`: if `true`, payload may override apply command.
+
+Configuration precedence is `appsettings.json`, environment-specific JSON, optional `appsettings.Local.json`, then `MC_AGENT__` environment variables. Keep real tokens and AMP credentials in the local file, user secrets, or environment variables; the local file is not copied into publish output.
 
 ## Environment Variable Examples
 
@@ -58,6 +63,7 @@ $env:MC_AGENT__PollIntervalSeconds = "20"
 - `noop`: completes immediately.
 - `sync_modpack`: downloads and applies a server pack to the configured install path.
 - `amp_console`: sends a direct AMP console command to a modpack's configured AMP instance.
+- `amp_config`: reads or updates a setting on a modpack's configured AMP instance and verifies writes.
 - `self_update`: downloads and stages an update ZIP. Optional apply command hook.
 
 ### sync_modpack Behavior
@@ -73,7 +79,9 @@ $env:MC_AGENT__PollIntervalSeconds = "20"
 - `modpack.currentVersion` is compared with the resolved target version and the sync is skipped when already current.
 - If `restartMode` has configured restart hooks, the agent can run warning/stop/start shell commands around apply.
 - If `restartMode=amp` and runner AMP controller settings are configured, agent fetches runtime AMP credentials from the runner and orchestrates restarts through ADS (`ADSModule/CallAPI`, `ADSModule/StopInstance`, `ADSModule/SetInstanceConfig`, `ADSModule/StartInstance`) using `modpack.ampInstanceName`.
+- If the runner provides per-modpack direct AMP API credentials, those are preferred over the older agent-local fallback settings. Keep these credentials in runner secrets and use HTTPS to the runner and AMP endpoints on untrusted networks.
 - In AMP mode, after stop/config updates and before start, the agent also invokes `Core/UpdateApplication` (the AMP "Update" action) so loader/platform changes are applied.
+- AMP `Core/Stop` and `Core/Start` responses mean the operation was accepted, not that the game process completed its transition. The agent polls `Core/GetStatus` and will not apply files until it confirms the game stopped or report success until the application is confirmed running. It fails closed on unknown state and observes `ModpackSync.AmpStateTimeoutSeconds` (10 minutes by default).
 - Legacy fallback remains available: if `modpack.ampApiUrl` is set and agent-local `ModpackSync.AmpApi.*` credentials are configured, direct instance API orchestration is used (`Core/Login`, `Core/SendConsoleMessage`, `Core/Stop`, `Core/SetConfigs`, `Core/Start`).
 - `modpack.ampConfigValuesJson` (optional JSON object) is applied through `Core/SetConfigs` before start; token placeholders are supported in values.
 - In AMP mode, auto-detected runtime metadata is also used to pre-populate startup settings such as `ServerType`, `ReleaseStream`, and `ServerJAR` before `Core/UpdateApplication`.
@@ -83,6 +91,7 @@ $env:MC_AGENT__PollIntervalSeconds = "20"
 - `forceFullSync` defaults to `true` when omitted.
 - `ignoreCurrentVersion=true` bypasses the already-current skip and reapplies the resolved pack version. The runner manual force-sync action uses this for reinstalling the latest files.
 - Full sync replaces top-level pack-managed entries from the ZIP.
+- Full sync replaces top-level entries present in the new pack. Unrelated top-level files absent from that archive are retained; use an explicit override `.DELETE` marker when an update must remove one.
 - Overlay mode (`forceFullSync=false`) copies files without deleting existing pack-managed entries.
 - These paths are always preserved: `world*`, `logs*`, `backups*`, `crash-reports*`, `server.properties*`, `eula*`, `ops*`, `whitelist*`, bans, and `usercache*`.
 - `modpack.preservedPaths` (optional array of install-root-relative paths) is snapshotted before apply and restored after sync/override work completes. Use this for runtime data that a pack incorrectly stores inside pack-managed folders like `kubejs/AOFEconomy`.
@@ -90,6 +99,17 @@ $env:MC_AGENT__PollIntervalSeconds = "20"
   Example: `mods/ftb-ranks-neoforge-*.jar.DELETE` deletes matching entries from `<installRoot>/mods`.
   On Windows, use safe tokens in filenames: `__STAR__` -> `*`, `__Q__` -> `?`.
   Example on Windows: `mods/ftb-ranks-neoforge-__STAR__.jar.DELETE`.
+- ZIP entries that traverse outside extraction or represent symbolic links are rejected. The configured install root must be a physical directory, and applying updates through an existing symbolic link/reparse point below it is also rejected.
+
+### Command Recovery
+
+The agent writes a local command journal before it acknowledges a command, before it enters a handler, and before it submits a final result. If a completion request fails transiently, the journal retries that exact result on the next poll or after process restart rather than running the update again. If the agent restarts while a command is only marked in progress, it reports an interrupted failure with an inspect-before-retry message. Check the target server and agent logs before manually retrying such a command: the filesystem or AMP side effects may already have happened.
+
+Run only one MCAgent process for a runner/token pair. The journal is scoped to that pair but is not a distributed lock and cannot coordinate multiple processes sharing the same credentials. Keep the journal file private and persistent across service restarts. If `CommandStatePath` is set explicitly, do not point different runner/token pairs at the same file. A completed result that was accepted by the runner but whose response was lost can remain in the local journal if the runner no longer returns that command; the agent has no completed-command listing with which to prune it automatically.
+
+`appsettings.Development.json` and `appsettings.Local.json` are not copied to publish output. Supply deployment settings through environment variables, user secrets during development, or a private configuration file managed outside the publish package.
+
+The publish output includes `scripts/apply-update-linux.sh` for the optional Linux self-update apply hook. Invoke it with `bash /path/to/scripts/apply-update-linux.sh <staging_dir> <target_dir> [service_name]`; this does not rely on an executable bit being retained by an archive.
 
 ### Restart Hook Template Tokens
 
@@ -124,7 +144,7 @@ AMP config JSON values support:
   "expectedSha256": "ABCDEF0123456789...",
   "version": "0.1.0",
   "applyNow": true,
-  "applyCommand": "/opt/mc-agent/scripts/apply-update-linux.sh \"{stagingDir}\" \"{baseDir}\" \"mc-agent\""
+  "applyCommand": "bash /opt/mc-agent/scripts/apply-update-linux.sh \"{stagingDir}\" \"{baseDir}\" \"mc-agent\""
 }
 ```
 
@@ -143,6 +163,8 @@ Publish:
 ```bash
 dotnet publish MCAgent/MCAgent.csproj -c Release -o /opt/mc-agent
 ```
+
+This framework-dependent publish requires the .NET 10 Runtime on the agent machine.
 
 Example unit:
 
@@ -191,3 +213,6 @@ Requirements on each target:
 - your SSH user has `sudo` rights
 - `rsync` installed
 - `mc-agent` systemd service already created
+- .NET 10 Runtime installed for the script's framework-dependent agent publish
+
+The deploy helper checks for the required runtime over SSH before copying files to the target.

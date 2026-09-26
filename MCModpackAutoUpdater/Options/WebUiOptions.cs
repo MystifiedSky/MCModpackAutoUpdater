@@ -8,5 +8,7 @@ public sealed class WebUiOptions
 
     public string DatabasePath { get; set; } = "mc-modpack-auto-updater.db";
 
+    public string? DataProtectionKeyPath { get; set; }
+
     public int SessionMinutes { get; set; } = 480;
 }

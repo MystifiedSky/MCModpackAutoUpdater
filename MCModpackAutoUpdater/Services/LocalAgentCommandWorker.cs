@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using MCAgent.Commands;
 using MCAgent.Models.AgentApi;
 using MCModpackAutoUpdater.Data;
+using System.Text.Json;
 
 namespace MCModpackAutoUpdater.Services;
 
@@ -10,6 +11,7 @@ public sealed class LocalAgentCommandWorker : BackgroundService
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<LocalAgentCommandWorker> _logger;
     private readonly IReadOnlyDictionary<string, IAgentCommandHandler> _handlers;
+    private readonly Dictionary<int, AgentCommandCompletionRequest> _completedResults = new();
 
     public LocalAgentCommandWorker(
         IServiceProvider serviceProvider,
@@ -44,7 +46,7 @@ public sealed class LocalAgentCommandWorker : BackgroundService
         }
     }
 
-    private async Task ProcessPendingLocalCommandsAsync(CancellationToken cancellationToken)
+    internal async Task ProcessPendingLocalCommandsAsync(CancellationToken cancellationToken)
     {
         using var scope = _serviceProvider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<UpdaterIdentityDbContext>();
@@ -65,18 +67,40 @@ public sealed class LocalAgentCommandWorker : BackgroundService
 
         foreach (var command in commands)
         {
-            await ProcessCommandAsync(command, commandService, cancellationToken);
+            await ProcessCommandAsync(command, commandService, dbContext, cancellationToken);
         }
     }
 
     private async Task ProcessCommandAsync(
         UpdaterAgentCommand command,
         UpdaterCommandService commandService,
+        UpdaterIdentityDbContext dbContext,
         CancellationToken cancellationToken)
     {
+        if (!_completedResults.TryGetValue(command.Id, out var completion) && command.LocalExecutionResultJson is not null)
+        {
+            try { completion = JsonSerializer.Deserialize<AgentCommandCompletionRequest>(command.LocalExecutionResultJson); }
+            catch (JsonException) { }
+        }
+        if (completion is not null)
+        {
+            await commandService.CompleteCommandAsync(command.Id, command.AgentNodeId, completion, cancellationToken);
+            _completedResults.Remove(command.Id);
+            return;
+        }
+        if (command.Status == UpdaterAgentCommandStatus.InProgress)
+        {
+            // An interrupted update may have changed files or stopped a server. Never
+            // repeat those side effects automatically without a recorded result.
+            await commandService.CompleteCommandAsync(command.Id, command.AgentNodeId,
+                new AgentCommandCompletionRequest { Success = false, Summary = "Local runner stopped during execution without a recorded result. Inspect the server before retrying." },
+                cancellationToken);
+            return;
+        }
         try
         {
-            await commandService.AcknowledgeCommandAsync(command.Id, command.AgentNodeId, cancellationToken);
+            var ack = await commandService.AcknowledgeCommandAsync(command.Id, command.AgentNodeId, cancellationToken);
+            if (ack is null) return;
         }
         catch (InvalidOperationException)
         {
@@ -84,7 +108,11 @@ public sealed class LocalAgentCommandWorker : BackgroundService
         }
 
         AgentCommandExecutionResult result;
-        if (!_handlers.TryGetValue(command.CommandType, out var handler))
+        if (string.Equals(command.CommandType, "self_update", StringComparison.OrdinalIgnoreCase))
+        {
+            result = AgentCommandExecutionResult.Failed("Self-update is supported only by remote MCAgent installations. Publish and redeploy the web runner to update the local agent.");
+        }
+        else if (!_handlers.TryGetValue(command.CommandType, out var handler))
         {
             result = AgentCommandExecutionResult.Failed($"No local handler registered for command type '{command.CommandType}'.");
         }
@@ -110,15 +138,19 @@ public sealed class LocalAgentCommandWorker : BackgroundService
             }
         }
 
-        await commandService.CompleteCommandAsync(
-            command.Id,
-            command.AgentNodeId,
-            new AgentCommandCompletionRequest
-            {
-                Success = result.Success,
-                Summary = result.Summary,
-                ResultPayloadJson = result.ResultPayloadJson
-            },
-            cancellationToken);
+        completion = new AgentCommandCompletionRequest
+        {
+            Success = result.Success,
+            Summary = result.Summary,
+            ResultPayloadJson = result.ResultPayloadJson
+        };
+        _completedResults[command.Id] = completion;
+        // Save the outcome before completion bookkeeping. A failed database write is
+        // retried from memory; a process restart can replay this durable result only.
+        var resultJson = JsonSerializer.Serialize(completion);
+        await dbContext.UpdaterAgentCommands.Where(item => item.Id == command.Id)
+            .ExecuteUpdateAsync(update => update.SetProperty(item => item.LocalExecutionResultJson, resultJson), cancellationToken);
+        await commandService.CompleteCommandAsync(command.Id, command.AgentNodeId, completion, cancellationToken);
+        _completedResults.Remove(command.Id);
     }
 }

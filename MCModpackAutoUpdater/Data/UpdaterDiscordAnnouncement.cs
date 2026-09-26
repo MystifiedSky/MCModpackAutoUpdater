@@ -31,4 +31,6 @@ public sealed class UpdaterDiscordAnnouncement
     public DateTime UpdatedUtc { get; set; }
 
     public DateTime? SentUtc { get; set; }
+
+    public DateTime? NextAttemptUtc { get; set; }
 }

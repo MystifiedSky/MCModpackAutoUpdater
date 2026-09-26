@@ -8,6 +8,8 @@ public sealed class AgentOptions
 
     public string AgentVersion { get; set; } = string.Empty;
 
+    public string CommandStatePath { get; set; } = string.Empty;
+
     public int PollIntervalSeconds { get; set; } = 30;
 
     public int ErrorBackoffSeconds { get; set; } = 15;
@@ -35,6 +37,8 @@ public sealed class SelfUpdateOptions
 public sealed class ModpackSyncOptions
 {
     public int MaxWarningMinutes { get; set; } = 240;
+
+    public int AmpStateTimeoutSeconds { get; set; } = 600;
 
     public bool FailIfRestartModeUnconfigured { get; set; }
 
