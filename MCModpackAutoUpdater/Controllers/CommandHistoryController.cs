@@ -280,6 +280,20 @@ public sealed class CommandHistoryController : Controller
                 TempData["Message"] = $"Cannot retry this sync while '{syncProfile.Name}' already has a pending or running sync.";
                 return RedirectToHistory(agentId, modpackId, status, commandType, page, pageSize);
             }
+
+            // The old command is a snapshot. Reusing its installation path,
+            // current version or source after a profile edit can target the
+            // wrong server. Keep the operator's original update options while
+            // taking the destination and configuration from the live profile.
+            payloadJson = SyncModpackCommandPayloadBuilder.Build(
+                syncProfile,
+                command.AgentNode,
+                ReadPayloadString(payloadJson, "options", "requestedVersion"),
+                ReadPayloadBoolean(payloadJson, "options", "forceFullSync") ?? syncProfile.ForceFullSync,
+                ReadPayloadBoolean(payloadJson, "options", "skipWarnings") ?? syncProfile.SkipWarnings,
+                ReadPayloadBoolean(payloadJson, "options", "ignoreCurrentVersion") ?? syncProfile.IgnoreCurrentVersion,
+                User.Identity?.Name ?? "admin",
+                DateTime.UtcNow);
         }
 
         var utcNow = DateTime.UtcNow;
@@ -298,7 +312,6 @@ public sealed class CommandHistoryController : Controller
         {
             syncProfile.LastQueuedUtc = utcNow;
             syncProfile.UpdatedUtc = utcNow;
-            var priorAudit = command.ModpackUpdateAudit;
             var requestedVersion = ReadPayloadString(payloadJson, "options", "requestedVersion");
             _dbContext.UpdaterModpackUpdateAudits.Add(new UpdaterModpackUpdateAudit
             {
@@ -308,8 +321,8 @@ public sealed class CommandHistoryController : Controller
                 TriggerSource = $"retry:{commandId}",
                 RequestedVersion = requestedVersion is { Length: > 100 } ? requestedVersion[..100] : requestedVersion,
                 PreviousVersion = syncProfile.CurrentVersion,
-                TargetVersion = priorAudit?.TargetVersion,
-                TargetVersionDisplay = priorAudit?.TargetVersionDisplay,
+                TargetVersion = null,
+                TargetVersionDisplay = null,
                 Status = UpdaterModpackUpdateAuditStatus.Queued,
                 Summary = $"Retried from command #{commandId}.",
                 CreatedUtc = utcNow,
@@ -485,6 +498,31 @@ public sealed class CommandHistoryController : Controller
                 {
                     JsonValueKind.String => value.GetString(),
                     JsonValueKind.Number => value.GetRawText(),
+                    _ => null
+                };
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return null;
+    }
+
+    private static bool? ReadPayloadBoolean(string payloadJson, string section, string property)
+    {
+        try
+        {
+            using var json = JsonDocument.Parse(payloadJson);
+            if (json.RootElement.ValueKind == JsonValueKind.Object &&
+                json.RootElement.TryGetProperty(section, out var objectElement) &&
+                objectElement.ValueKind == JsonValueKind.Object &&
+                objectElement.TryGetProperty(property, out var value))
+            {
+                return value.ValueKind switch
+                {
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
                     _ => null
                 };
             }

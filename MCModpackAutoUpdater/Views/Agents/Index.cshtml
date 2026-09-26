@@ -22,7 +22,10 @@
 <section class="panel">
     <h2>Add Remote Agent</h2>
     <form asp-action="Create" method="post" class="form-grid">
-        <div asp-validation-summary="All" class="validation"></div>
+        @if (Model.EditedAgent is null)
+        {
+            <div asp-validation-summary="All" class="validation"></div>
+        }
         <div>
             <label asp-for="NewAgent.Name">Name</label>
             <input asp-for="NewAgent.Name" name="Name" required />
@@ -88,6 +91,7 @@
 
 @foreach (var agent in Model.Agents)
 {
+    var editedAgent = Model.EditedAgent?.Id == agent.Id ? Model.EditedAgent : null;
     <section class="panel profile-editor">
         <div class="card-head">
             <div>
@@ -120,28 +124,32 @@
             <p class="muted">@agent.LastReportedStatus</p>
         }
         <form asp-action="Update" method="post" class="form-grid">
+            @if (editedAgent is not null)
+            {
+                <div class="wide validation" asp-validation-summary="All"></div>
+            }
             <input type="hidden" name="Id" value="@agent.Id" />
             <div>
                 <label>Name</label>
-                <input name="Name" value="@agent.Name" required />
+                <input name="Name" value="@(editedAgent?.Name ?? agent.Name)" required maxlength="100" />
             </div>
             <div>
                 <label>Host</label>
-                <input name="Host" value="@agent.Host" required />
+                <input name="Host" value="@(editedAgent?.Host ?? agent.Host)" required maxlength="255" />
             </div>
             <div>
                 <label>Runner API URL</label>
-                <input name="ApiBaseUrl" value="@agent.ApiBaseUrl" required @(agent.ExecutionMode == UpdaterAgentExecutionMode.Local ? "readonly" : null) />
+                <input name="ApiBaseUrl" value="@(editedAgent?.ApiBaseUrl ?? agent.ApiBaseUrl)" required maxlength="500" @(agent.ExecutionMode == UpdaterAgentExecutionMode.Local ? "readonly" : null) />
             </div>
             <div>
                 <label>Platform</label>
                 <select name="Platform">
-                    <option value="Linux" selected="@(agent.Platform == "Linux")">Linux</option>
-                    <option value="Windows" selected="@(agent.Platform == "Windows")">Windows</option>
+                    <option value="Linux" selected="@((editedAgent?.Platform ?? agent.Platform) == "Linux")">Linux</option>
+                    <option value="Windows" selected="@((editedAgent?.Platform ?? agent.Platform) == "Windows")">Windows</option>
                 </select>
             </div>
             <label class="check">
-                <input type="checkbox" name="Enabled" value="true" checked="@agent.Enabled" />
+                <input type="checkbox" name="Enabled" value="true" checked="@(editedAgent?.Enabled ?? agent.Enabled)" />
                 <input type="hidden" name="Enabled" value="false" />
                 <span>Enabled</span>
             </label>

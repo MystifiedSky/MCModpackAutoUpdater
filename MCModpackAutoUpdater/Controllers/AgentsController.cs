@@ -41,7 +41,7 @@ public sealed class AgentsController : Controller
 
         if (!ModelState.IsValid)
         {
-            return View(nameof(Index), await BuildModelAsync(null, cancellationToken));
+            return View(nameof(Index), await BuildModelAsync(null, cancellationToken, model));
         }
 
         var token = UpdaterAgentTokenUtility.GenerateToken();
@@ -87,7 +87,7 @@ public sealed class AgentsController : Controller
 
         if (!ModelState.IsValid)
         {
-            return View(nameof(Index), await BuildModelAsync(null, cancellationToken));
+            return View(nameof(Index), await BuildModelAsync(null, cancellationToken, editedAgent: model));
         }
 
         agent.Name = normalizedName;
@@ -181,15 +181,15 @@ public sealed class AgentsController : Controller
         var commandType = model.CommandType?.Trim() ?? string.Empty;
         if (string.IsNullOrWhiteSpace(commandType) || commandType.Length > 100)
         {
-            TempData["Message"] = "Command type is required and must be 100 characters or fewer.";
-            return RedirectToDetails(agent.Id);
+            return await ReturnCommandErrorAsync(
+                agent.Id, model, "Command type is required and must be 100 characters or fewer.", cancellationToken);
         }
 
         var payloadJson = string.IsNullOrWhiteSpace(model.PayloadJson) ? "{}" : model.PayloadJson.Trim();
         if (payloadJson.Length > 20000)
         {
-            TempData["Message"] = "Payload JSON must be 20,000 characters or fewer.";
-            return RedirectToDetails(agent.Id);
+            return await ReturnCommandErrorAsync(
+                agent.Id, model, "Payload JSON must be 20,000 characters or fewer.", cancellationToken);
         }
 
         try
@@ -198,8 +198,7 @@ public sealed class AgentsController : Controller
         }
         catch (JsonException)
         {
-            TempData["Message"] = "Payload must be valid JSON.";
-            return RedirectToDetails(agent.Id);
+            return await ReturnCommandErrorAsync(agent.Id, model, "Payload must be valid JSON.", cancellationToken);
         }
 
         await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
@@ -217,8 +216,8 @@ public sealed class AgentsController : Controller
         var syncProfileId = isSyncCommand ? UpdaterCommandService.ReadModpackId(payloadJson) : null;
         if (isSyncCommand && !syncProfileId.HasValue)
         {
-            TempData["Message"] = "A sync command must identify its modpack profile in the payload.";
-            return RedirectToDetails(agent.Id);
+            return await ReturnCommandErrorAsync(
+                agent.Id, model, "A sync command must identify its modpack profile in the payload.", cancellationToken);
         }
 
         if (isSyncCommand)
@@ -227,14 +226,14 @@ public sealed class AgentsController : Controller
                 .FirstOrDefaultAsync(profile => profile.Id == syncProfileId!.Value, cancellationToken);
             if (syncProfile is null || syncProfile.AgentNodeId != agent.Id)
             {
-                TempData["Message"] = "The sync profile is missing or is not assigned to the selected agent.";
-                return RedirectToDetails(agent.Id);
+                return await ReturnCommandErrorAsync(
+                    agent.Id, model, "The sync profile is missing or is not assigned to the selected agent.", cancellationToken);
             }
 
             if (await _commandService.HasActiveSyncCommandForModpackAsync(syncProfile.Id, cancellationToken))
             {
-                TempData["Message"] = $"'{syncProfile.Name}' already has a pending or running sync command.";
-                return RedirectToDetails(agent.Id);
+                return await ReturnCommandErrorAsync(
+                    agent.Id, model, $"'{syncProfile.Name}' already has a pending or running sync command.", cancellationToken);
             }
         }
 
@@ -284,6 +283,24 @@ public sealed class AgentsController : Controller
         bool autoRefresh = true,
         CancellationToken cancellationToken = default)
     {
+        var model = await BuildDetailsModelAsync(id, page, pageSize, autoRefresh, cancellationToken);
+        if (model is null)
+        {
+            TempData["Message"] = "Agent was not found.";
+            return RedirectToAction(nameof(Index));
+        }
+
+        return View(model);
+    }
+
+    private async Task<AgentDetailsViewModel?> BuildDetailsModelAsync(
+        int id,
+        int page,
+        int pageSize,
+        bool autoRefresh,
+        CancellationToken cancellationToken,
+        AgentCommandFormModel? newCommand = null)
+    {
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 10, 200);
 
@@ -292,8 +309,7 @@ public sealed class AgentsController : Controller
             .FirstOrDefaultAsync(current => current.Id == id, cancellationToken);
         if (agent is null)
         {
-            TempData["Message"] = "Agent was not found.";
-            return RedirectToAction(nameof(Index));
+            return null;
         }
 
         var statusCounts = await _dbContext.UpdaterAgentCommands
@@ -359,11 +375,11 @@ public sealed class AgentsController : Controller
         statusCounts.TryGetValue(UpdaterAgentCommandStatus.Failed, out var failedCount);
         statusCounts.TryGetValue(UpdaterAgentCommandStatus.Cancelled, out var cancelledCount);
 
-        return View(new AgentDetailsViewModel
+        return new AgentDetailsViewModel
         {
             Agent = agentModel,
             Commands = commands,
-            NewCommand = new AgentCommandFormModel { AgentNodeId = id },
+            NewCommand = newCommand ?? new AgentCommandFormModel { AgentNodeId = id },
             Page = page,
             PageSize = pageSize,
             TotalCount = totalCount,
@@ -374,10 +390,27 @@ public sealed class AgentsController : Controller
             TotalFailed = failedCount,
             TotalCancelled = cancelledCount,
             AutoRefresh = autoRefresh
-        });
+        };
     }
 
-    private async Task<AgentsIndexViewModel> BuildModelAsync(string? token, CancellationToken cancellationToken)
+    private async Task<IActionResult> ReturnCommandErrorAsync(
+        int agentId,
+        AgentCommandFormModel model,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        TempData["Message"] = message;
+        var detailsModel = await BuildDetailsModelAsync(agentId, 1, 25, false, cancellationToken, model);
+        return detailsModel is null
+            ? RedirectToAction(nameof(Index))
+            : View(nameof(Details), detailsModel);
+    }
+
+    private async Task<AgentsIndexViewModel> BuildModelAsync(
+        string? token,
+        CancellationToken cancellationToken,
+        AgentNodeFormModel? newAgent = null,
+        AgentNodeFormModel? editedAgent = null)
     {
         var agents = await _dbContext.UpdaterAgentNodes
             .AsNoTracking()
@@ -407,7 +440,8 @@ public sealed class AgentsController : Controller
         return new AgentsIndexViewModel
         {
             Agents = agents,
-            NewAgent = new AgentNodeFormModel(),
+            NewAgent = newAgent ?? new AgentNodeFormModel(),
+            EditedAgent = editedAgent,
             NewCommand = new AgentCommandFormModel
             {
                 AgentNodeId = agents.FirstOrDefault(agent => agent.Enabled)?.Id ?? agents.FirstOrDefault()?.Id ?? 0

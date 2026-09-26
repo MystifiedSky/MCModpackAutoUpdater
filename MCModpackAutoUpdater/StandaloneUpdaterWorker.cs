@@ -111,7 +111,8 @@ public sealed class StandaloneUpdaterWorker : BackgroundService
                 continue;
             }
 
-            if (!_startupRuns.Add(profile.Id.ToString(CultureInfo.InvariantCulture)))
+            var startupKey = profile.Id.ToString(CultureInfo.InvariantCulture);
+            if (_startupRuns.Contains(startupKey))
             {
                 continue;
             }
@@ -124,6 +125,7 @@ public sealed class StandaloneUpdaterWorker : BackgroundService
 
             if (await commandService.HasActiveSyncCommandForModpackAsync(profile.Id, cancellationToken))
             {
+                _startupRuns.Add(startupKey);
                 if (forceAllEnabledProfiles && profile.AgentNode is not null)
                 {
                     commandIds.AddRange(await ReadActiveSyncCommandIdsAsync(
@@ -150,10 +152,12 @@ public sealed class StandaloneUpdaterWorker : BackgroundService
                     profile.RequestedVersion,
                     null,
                     cancellationToken);
+                _startupRuns.Add(startupKey);
                 commandIds.Add(command.Id);
             }
             catch (DuplicateSyncCommandException)
             {
+                _startupRuns.Add(startupKey);
                 _logger.LogInformation(
                     "Startup queue skipped for {ProfileName}; a sync command became active concurrently.",
                     profile.Name);
@@ -345,16 +349,26 @@ public sealed class StandaloneUpdaterWorker : BackgroundService
         int agentNodeId,
         CancellationToken cancellationToken)
     {
-        var marker = $"\"modpack\":{{\"id\":{modpackId},";
-        return await dbContext.UpdaterAgentCommands
+        var activeCommands = await dbContext.UpdaterAgentCommands
             .AsNoTracking()
             .Where(command =>
                 command.AgentNodeId == agentNodeId &&
                 command.CommandType == "sync_modpack" &&
                 (command.Status == UpdaterAgentCommandStatus.Pending ||
-                 command.Status == UpdaterAgentCommandStatus.InProgress) &&
-                EF.Functions.Like(command.PayloadJson, $"%{marker}%"))
-            .Select(command => command.Id)
+                 command.Status == UpdaterAgentCommandStatus.InProgress))
+            .Select(command => new
+            {
+                command.Id,
+                command.PayloadJson,
+                ProfileId = command.ModpackUpdateAudit == null
+                    ? (int?)null
+                    : command.ModpackUpdateAudit.ModpackProfileId
+            })
             .ToListAsync(cancellationToken);
+        return activeCommands
+            .Where(command => command.ProfileId == modpackId ||
+                              UpdaterCommandService.ReadModpackId(command.PayloadJson) == modpackId)
+            .Select(command => command.Id)
+            .ToArray();
     }
 }

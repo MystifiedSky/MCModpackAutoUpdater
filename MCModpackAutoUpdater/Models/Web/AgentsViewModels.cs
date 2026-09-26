@@ -8,6 +8,8 @@ public sealed class AgentsIndexViewModel
 
     public required AgentNodeFormModel NewAgent { get; init; }
 
+    public AgentNodeFormModel? EditedAgent { get; init; }
+
     public required AgentCommandFormModel NewCommand { get; init; }
 
     public string? GeneratedToken { get; init; }

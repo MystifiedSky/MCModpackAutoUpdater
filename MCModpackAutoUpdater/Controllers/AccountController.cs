@@ -98,14 +98,17 @@ public sealed class AccountController : Controller
 
     [AllowAnonymous]
     [HttpGet("/login")]
-    public async Task<IActionResult> Login(CancellationToken cancellationToken)
+    public async Task<IActionResult> Login(string? returnUrl, CancellationToken cancellationToken)
     {
         if (!await HasUsersAsync(cancellationToken))
         {
             return RedirectToAction(nameof(Setup));
         }
 
-        return View(new LoginViewModel());
+        return View(new LoginViewModel
+        {
+            ReturnUrl = Url.IsLocalUrl(returnUrl) ? returnUrl : null
+        });
     }
 
     [AllowAnonymous]
@@ -130,6 +133,11 @@ public sealed class AccountController : Controller
             lockoutOnFailure: true);
         if (result.Succeeded)
         {
+            if (Url.IsLocalUrl(model.ReturnUrl))
+            {
+                return LocalRedirect(model.ReturnUrl!);
+            }
+
             return RedirectToAction("Index", "Dashboard");
         }
 

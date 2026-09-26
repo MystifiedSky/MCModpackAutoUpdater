@@ -1,0 +1,78 @@
+@model UserEditViewModel
+@{
+    ViewData["Title"] = "Manage User";
+    var cannotChangeRole = Model.IsCurrentUser || Model.IsLastAdministrator;
+}
+
+<section class="page-head">
+    <div>
+        <h1>Manage User</h1>
+        <p class="muted">@Model.UserName</p>
+    </div>
+    <a class="button" asp-action="Index">Back to Users</a>
+</section>
+
+<section class="panel narrow">
+    <h2>Account details</h2>
+    <form asp-action="Update" asp-route-id="@Model.Id" method="post">
+        <div asp-validation-summary="All" class="validation"></div>
+        <label asp-for="Email"></label>
+        <input asp-for="Email" autocomplete="email" />
+        <label asp-for="Role"></label>
+        @if (cannotChangeRole)
+        {
+            <input asp-for="Role" type="hidden" />
+            <input value="@Model.Role" readonly aria-readonly="true" />
+            @if (Model.IsCurrentUser)
+            {
+                <p class="muted">You cannot change your own administrator role.</p>
+            }
+            else
+            {
+                <p class="muted">The last administrator must keep administrator access.</p>
+            }
+        }
+        else
+        {
+            <select asp-for="Role">
+                @foreach (var role in Model.AvailableRoles)
+                {
+                    <option value="@role">@role</option>
+                }
+            </select>
+        }
+        <button type="submit" class="primary">Save Account</button>
+    </form>
+</section>
+
+<section class="panel narrow">
+    <h2>Reset password</h2>
+    <p class="muted">The user will need to sign in again with the new password.</p>
+    <form asp-action="ResetPassword" asp-route-id="@Model.Id" method="post">
+        <label for="NewPassword">New password</label>
+        <input id="NewPassword" name="NewPassword" type="password" autocomplete="new-password" minlength="10" required />
+        <label for="ConfirmPassword">Confirm new password</label>
+        <input id="ConfirmPassword" name="ConfirmPassword" type="password" autocomplete="new-password" minlength="10" required />
+        <button type="submit">Reset Password</button>
+    </form>
+</section>
+
+<section class="panel narrow">
+    <h2>Remove account</h2>
+    @if (Model.IsCurrentUser)
+    {
+        <p class="muted">You cannot remove the account you are currently using.</p>
+    }
+    else if (Model.IsLastAdministrator)
+    {
+        <p class="muted">The last administrator cannot be removed.</p>
+    }
+    else
+    {
+        <p class="muted">This permanently removes the account and its role assignments.</p>
+    }
+    <form asp-action="Delete" asp-route-id="@Model.Id" method="post"
+          onsubmit="return confirm('Permanently delete this user account?');">
+        <button type="submit" class="danger" disabled="@(Model.IsCurrentUser || Model.IsLastAdministrator)">Delete User</button>
+    </form>
+</section>

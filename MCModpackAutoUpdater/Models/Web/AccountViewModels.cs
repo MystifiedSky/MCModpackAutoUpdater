@@ -4,6 +4,8 @@ namespace MCModpackAutoUpdater.Models.Web;
 
 public sealed class LoginViewModel
 {
+    public string? ReturnUrl { get; set; }
+
     [Required]
     public string UserName { get; set; } = string.Empty;
 

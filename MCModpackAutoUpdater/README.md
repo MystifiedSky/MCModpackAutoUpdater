@@ -1,87 +1,73 @@
 # MCModpackAutoUpdater
 
-`MCModpackAutoUpdater` is a standalone .NET app for Minecraft modpack update orchestration that runs through the shared `MCAgent` command handlers.
+`MCModpackAutoUpdater` is the standalone control app for scheduling and managing Minecraft modpack updates. It hosts the authenticated web UI, stores users/profiles/agents/commands in SQLite, and includes a local worker. A separate [MCAgent](../MCAgent/README.md) can apply updates on another machine.
 
-It owns its local SQLite database for users, modpack profiles, agent nodes, persistent command queue entries, and update audit history. It can execute commands locally through an embedded agent worker or queue them for remote `MCAgent` machines through the runner API.
+The web UI supports first-run admin setup, Admin/Operator/Viewer roles, profile and agent management, update checks and queues, command history, AMP configuration, and Discord announcements.
 
-The app also hosts a local web UI with ASP.NET Core Identity:
+## Run from Source
 
-- first-run setup with a one-time token printed to the console/log
-- local SQLite users and roles
-- cookie login
-- roles: `Admin`, `Operator`, `Viewer`
-- dashboard with profile state, persisted dry-run checks, summary cards, check-and-queue, manual force-sync queueing, and profile enable toggles
-- admin settings page for live runtime settings, AMP credentials, Discord announcements, and SQLite-backed modpack profile CRUD
-- agent management for local/remote execution targets
-- command history for queued/completed work, filtering, JSON payload/result inspection, retry, and AMP debug commands
-
-## Run
+From the repository root with the .NET 10 SDK installed:
 
 ```powershell
-dotnet run --project MCModpackAutoUpdater/MCModpackAutoUpdater.csproj
+$env:MC_UPDATER__WebUi__BindUrl = "http://127.0.0.1:9090"
+dotnet run --project .\MCModpackAutoUpdater\MCModpackAutoUpdater.csproj
 ```
 
-Open `/setup` at the configured web UI URL, default `http://localhost:9090`. Then check the console/AMP log for:
+`dotnet run` restores and builds when needed. The local bind override above keeps this development instance reachable only from the same machine. The default app configuration listens on all network interfaces; set an appropriate bind address and network protection before exposing it.
 
-```text
-MCModpackAutoUpdater first-run setup token: ...
-```
+Open `http://127.0.0.1:9090/setup`. That first page request generates and logs the one-time setup token. Copy it from the terminal, create the first admin account, and sign in. Once any account exists, `/setup` redirects to `/login`.
 
-Create the first admin at `/setup`. After that:
-
-- use `/settings` to configure AMP credentials and modpack profiles
-- use `/agents` to add remote machines or rotate agent tokens
-- use `/history` to inspect or cancel queued commands
-- use `/users` to create additional accounts
-- use `/` for dashboard status and manual update actions
+The app creates the SQLite database and built-in `Local Runner` automatically. Assign a profile to `Local Runner` when the web app process can access the Minecraft server directory. For a step-by-step first profile, follow [the root quick start](../README.md#create-a-first-test-profile).
 
 ## Publish
 
+The GitHub Actions workflow creates self-contained Linux and Windows web app packages. These include the .NET runtime, so a separate runtime installation is not required. For a framework-dependent publish, use:
+
 ```powershell
-dotnet publish MCModpackAutoUpdater/MCModpackAutoUpdater.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o out/mc-modpack-auto-updater-linux-x64
+dotnet publish .\MCModpackAutoUpdater\MCModpackAutoUpdater.csproj -c Release -o .\publish\web
+Set-Location .\publish\web
+dotnet .\MCModpackAutoUpdater.dll
 ```
+
+Run from the publish directory so configuration loads from the publish output and relative database/key paths resolve there. The framework-dependent package requires the .NET 10 ASP.NET Core Runtime. See the root README for release asset names and AMP installation.
 
 ## Configuration
 
-The runner reads:
+The runner reads, in order:
 
 - `appsettings.json`
 - `appsettings.{Environment}.json`
+- optional private `appsettings.Local.json`
 - environment variables prefixed with `MC_UPDATER__`
-- environment variables prefixed with `MC_AGENT__` for reused sync-handler settings
+- environment variables prefixed with `MC_AGENT__` for embedded agent settings
 
-Modpack profiles are created in the web UI. There is no appsettings or AMP example-profile import path.
+For example, `MC_UPDATER__WebUi__BindUrl` overrides `WebUi:BindUrl`. The prefix is removed before configuration binding. Embedded agent settings such as `MC_AGENT__ModpackSync__AmpStateTimeoutSeconds` can be set the same way. `appsettings.Local.json` is excluded from publish output. Put a separately managed private copy beside the deployed app, or configure production values through environment variables.
 
-AMP should only configure startup/deployment settings that must exist before the app runs:
+Default startup settings are in [appsettings.json](appsettings.json). Important values include:
 
-- web bind port
-- SQLite database path
-- release repository and release asset names used by the AMP update template
+- `WebUi:BindUrl`: defaults to `http://0.0.0.0:9090`.
+- `WebUi:DatabasePath`: SQLite database for UI accounts, roles, agents, profiles, commands, and audit history. Relative paths resolve from the process's current working directory.
+- `WebUi:DataProtectionKeyPath`: durable key directory; defaults to `data-protection-keys` beside the database. Back up the key directory with the database to retain access to encrypted credentials.
 
-Operational settings such as scheduler behavior, AMP credentials, Discord settings, agents, and modpack profiles are stored in SQLite and managed from the web UI.
+Operational settings such as scheduling, AMP credentials, Discord, agents, and modpack profiles are managed in the web UI and stored in SQLite. Profiles are not imported from appsettings or an AMP template.
 
-Important fields:
+## Profile Notes
 
-- `WebUi:BindUrl`: web UI bind URL, default `http://0.0.0.0:9090`.
-- `WebUi:DatabasePath`: local SQLite database used for UI users, roles, agents, profiles, commands, and audits.
-- `WebUi:DataProtectionKeyPath`: durable key directory; defaults to `data-protection-keys` beside the database. Back it up with the database to retain access to encrypted credentials.
-- `Provider`: `CurseForge`, `FTB`, or direct/custom URL mode with `ServerPackUrl`.
-- `SourceReference`: CurseForge project ID/URL or FTB pack ID/URL.
-- `CurrentVersion`: installed file/version ID. After queued syncs complete, SQLite profile state is updated from the agent result.
-- `ScheduleTime`: local time in `HH:mm` for the live runtime `ScheduleTimeZone` setting.
-- `InstallRootPath`: absolute path to the Minecraft server files.
-- `RestartMode`: use `amp` for AMP API orchestration, `none` to only apply files, or a configured shell restart mode.
-- ADS controller and direct AMP API credentials are configured in `/settings`.
-- Discord announcements are configured in `/settings`; profile channel/role IDs are stored per profile.
+Profiles are created in `/settings`. Choose an agent that can access the target install directory and use an absolute path as seen by that agent.
 
-`ServerPackExcludedPathsText`, `ServerPackExcludedCurseForgeProjectIdsText`, and `PreservedPathsText` are semicolon/newline text fields saved from the web UI.
+- `Provider`: `CurseForge`, `FTB`, or `Direct`.
+- `SourceReference`: CurseForge project ID or FTB pack ID. IDs and URLs containing a numeric path segment are supported; human-readable project slugs are not resolved.
+- `ServerPackUrl`: used directly in `Direct` mode. A valid CurseForge or FTB source takes precedence; the URL is a fallback when the source does not identify a provider project or pack.
+- `VersionLock`: pins a provider version. For a direct URL, the resolver scans all path segments from right to left and uses the rightmost positive numeric segment before this field. Set this to a version label only when the URL path has no positive numeric segment; a URL such as `/2026/serverpack.zip` resolves to `2026` even if a lock is set. Direct mode does not inspect ZIP contents or detect changed bytes at the same URL.
+- `CurrentVersion`: last version ID reported after a completed sync. The updater compares version IDs for equality; it does not semantically order arbitrary labels.
+- `ScheduleTime`: daily local time in `HH:mm` using the configured `ScheduleTimeZone`.
+- `RestartMode`: `amp` for AMP orchestration, `none` to apply files without stopping or starting the game process, or a configured shell hook.
+- AMP controller/direct API settings are managed in `/settings`; Discord settings and per-profile channel/role IDs are there too.
+
+`ServerPackExcludedPathsText`, `ServerPackExcludedCurseForgeProjectIdsText`, and `PreservedPathsText` are semicolon/newline text fields saved from the web UI. CurseForge profiles can be built from client files when a project has no server pack. FTB packs are materialized with the official FTB server installer, which intentionally skips Java and modloader installation; outside AMP, install and configure those separately.
 
 ## AMP Template
 
-The `amp-template` folder contains an AMP Generic Module template for hosting the web runner. Add this repository in AMP's Configuration Repositories settings and fetch the template as described in the root README.
+The `amp-template` folder contains an AMP Generic Module template. The template settings include `Release Repository`, Linux/Windows release asset names, `Web UI Port`, and `Web UI Database Path`. It passes the port and database path to the app at startup.
 
-The AMP template exposes `WebUIPort` and passes it to the app as:
-
-```text
-MC_UPDATER__WebUi__BindUrl=http://0.0.0.0:{WebUIPort}
-```
+For AMP repository setup and template maintenance, see [the AMP template guide](amp-template/README.md) and the root [AMP Template Install](../README.md#amp-template-install) section. The `main` branch source files and AMP's `amp-templates` branch are maintained separately; pushing application changes to `main` does not update that branch.

@@ -79,7 +79,8 @@ function Get-RsyncExcludes {
     $paths = @(
         '/updates/', '/state/', '/private/',
         '/appsettings.*.json', '**/appsettings.*.json',
-        '/agent-command-state*.json', '**/agent-command-state*.json'
+        '/agent-command-state*.json', '**/agent-command-state*.json',
+        '/agent-command-state*.json.tmp', '**/agent-command-state*.json.tmp'
     )
     $additional = Get-OptionalPropertyValue -Object $Target -PropertyName 'preservePaths'
     foreach ($path in @($additional))
@@ -93,6 +94,7 @@ function Get-RsyncExcludes {
             throw "Invalid preservePaths entry '$value'; use a relative path without wildcards or traversal."
         }
         $paths += '/' + $value.TrimEnd('/')
+        $paths += '/' + $value.TrimEnd('/') + '.tmp'
     }
     return $paths
 }

@@ -205,6 +205,12 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             var hasExplicitAmpConfigValues = !string.IsNullOrWhiteSpace(modpack.AmpConfigValuesJson);
             var ampRuntimeConfig = await TryGetAmpRuntimeConfigAsync(restartMode, modpack, cancellationToken);
             var ampApiRestartPlan = TryResolveAmpApiRestartPlan(restartMode, modpack, ampRuntimeConfig);
+            if (IsAmpRestartMode(restartMode) && ampApiRestartPlan is null)
+            {
+                throw new InvalidOperationException(
+                    $"restartMode '{restartMode}' requires configured AMP control. No usable AMP API credentials were available, so server files were not changed.");
+            }
+
             var restartPlan = ampApiRestartPlan is null
                 ? ResolveRestartPlan(restartMode)
                 : RestartPlan.Disabled("restart_mode_amp_api");
@@ -1126,7 +1132,10 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         Directory.CreateDirectory(generatedModsDirectory);
 
         var overridesDirectoryName = Normalize(manifest.Overrides) ?? "overrides";
-        var overridesDirectory = Path.Combine(clientRoot, overridesDirectoryName);
+        var overridesDirectory = ResolveRelativePathUnderRoot(
+            clientRoot,
+            overridesDirectoryName,
+            "CurseForge manifest overrides directory");
         if (Directory.Exists(overridesDirectory))
         {
             CopyDirectoryRecursive(overridesDirectory, generatedRoot, new SyncApplyStats());
@@ -3769,13 +3778,42 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         int projectId,
         CancellationToken cancellationToken)
     {
-        var url = $"https://www.curseforge.com/api/v1/mods/{projectId}/files?pageSize=50";
-        var response = await GetJsonAsync<CurseForgeListResponse<CurseForgeFileEntry>>(url, cancellationToken);
-        var files = response.Data?
+        const int pageSize = 50;
+        const int maxIndexedFiles = 10_000;
+        var filesById = new Dictionary<int, CurseForgeFileEntry>();
+        var index = 0;
+
+        while (index < maxIndexedFiles)
+        {
+            var url = $"https://www.curseforge.com/api/v1/mods/{projectId}/files?index={index}&pageSize={pageSize}";
+            var response = await GetJsonAsync<CurseForgeListResponse<CurseForgeFileEntry>>(url, cancellationToken);
+            var page = response.Data ?? [];
+            if (page.Count == 0)
+            {
+                break;
+            }
+
+            var newFiles = 0;
+            foreach (var file in page)
+            {
+                if (file.Id > 0 && filesById.TryAdd(file.Id, file))
+                {
+                    newFiles++;
+                }
+            }
+
+            index += page.Count;
+            if (newFiles == 0 || page.Count < pageSize ||
+                (response.Pagination?.TotalCount > 0 && index >= response.Pagination.TotalCount))
+            {
+                break;
+            }
+        }
+
+        var files = filesById.Values
             .Where(file => file.Status == CurseForgePublishedStatus)
             .OrderByDescending(file => file.DateCreated)
-            .ToList()
-            ?? [];
+            .ToList();
 
         if (files.Count == 0)
         {
@@ -7504,6 +7542,13 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
 
     private static string? ResolveVersionReference(ResolvedServerPackSource source)
     {
+        if (string.Equals(source.SourceKind, "direct_url", StringComparison.OrdinalIgnoreCase) &&
+            Uri.TryCreate(source.DownloadUrl, UriKind.Absolute, out var directUrl) &&
+            TryExtractTrailingNumericSegment(directUrl.AbsolutePath, out var directUrlFileId))
+        {
+            return directUrlFileId.ToString(CultureInfo.InvariantCulture);
+        }
+
         if (source.ServerPackFileId.HasValue)
         {
             return source.ServerPackFileId.Value.ToString(CultureInfo.InvariantCulture);
@@ -7520,6 +7565,21 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         }
 
         return Normalize(source.SelectedVersion);
+    }
+
+    private static bool TryExtractTrailingNumericSegment(string absolutePath, out int value)
+    {
+        value = 0;
+        foreach (var segment in absolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).Reverse())
+        {
+            if (int.TryParse(segment, NumberStyles.Integer, CultureInfo.InvariantCulture, out value) && value > 0)
+            {
+                return true;
+            }
+        }
+
+        value = 0;
+        return false;
     }
 
     private static string? ResolveVersionDisplayReference(ResolvedServerPackSource source)
@@ -8129,6 +8189,13 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
     private sealed class CurseForgeListResponse<TItem>
     {
         public List<TItem>? Data { get; set; }
+
+        public CurseForgePagination? Pagination { get; set; }
+    }
+
+    private sealed class CurseForgePagination
+    {
+        public int TotalCount { get; set; }
     }
 
     private sealed class CurseForgeFileEntry

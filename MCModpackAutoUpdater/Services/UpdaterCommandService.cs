@@ -309,9 +309,20 @@ public sealed class UpdaterCommandService
             return;
         }
 
+        // A profile can be reassigned while an old agent is still running. Its
+        // audit belongs to the old command, but the newly assigned installation
+        // must not inherit that agent's version or receive its announcement.
+        if (profile.AgentNodeId != command.AgentNodeId)
+        {
+            audit.Summary = TruncateOrNull(
+                $"{audit.Summary} Profile state was not updated because the assigned agent changed during this command.",
+                500);
+            return;
+        }
+
         profile.LastRunUtc = utcNow;
         profile.LastSucceeded = request.Success;
-        profile.LastSkipped = skipped;
+        profile.LastSkipped = request.Success && skipped;
         profile.LastSummary = TruncateOrNull(request.Summary, 500);
         profile.LastResultPayloadJson = TruncateOrNull(request.ResultPayloadJson, 20000);
         profile.UpdatedUtc = utcNow;
@@ -319,7 +330,7 @@ public sealed class UpdaterCommandService
         if (request.Success)
         {
             profile.LastSuccessUtc = utcNow;
-            if (!string.IsNullOrWhiteSpace(resolvedVersion))
+            if (!skipped && !string.IsNullOrWhiteSpace(resolvedVersion))
             {
                 profile.CurrentVersion = resolvedVersion;
                 profile.CurrentVersionDisplay = resolvedVersionDisplay;

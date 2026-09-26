@@ -1,19 +1,8 @@
 {
   "targets": [
     {
-      "name": "example-amp-host-1",
-      "host": "amp-host-1.example.com",
-      "sshUser": "mc-agent-deployer",
-      "sshKeyPath": "~/.ssh/id_ed25519",
-      "sshPort": 22,
-      "uploadBasePath": "/home/mc-agent-deployer/deploy",
-      "remotePath": "/opt/mc-agent",
-      "serviceUser": "amp",
-      "serviceName": "mc-agent"
-    },
-    {
-      "name": "example-amp-host-2",
-      "host": "amp-host-2.example.com",
+      "name": "example-amp-host",
+      "host": "amp-host.example.com",
       "sshUser": "mc-agent-deployer",
       "sshKeyPath": "~/.ssh/id_ed25519",
       "sshPort": 22,

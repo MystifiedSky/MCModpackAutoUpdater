@@ -24,10 +24,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
 
@@ -63,7 +63,7 @@ jobs:
           zip -r ../mc-agent-${{ matrix.runtime }}.zip .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset_name }}
           path: ./artifacts/${{ matrix.runtime }}/*.zip
@@ -74,26 +74,44 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
+    concurrency:
+      group: publish-latest-release
+      cancel-in-progress: false
+      queue: max
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ./release-assets
           merge-multiple: true
 
+      - name: Check that this is still the current main build
+        id: current
+        shell: bash
+        run: |
+          current_sha=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$current_sha" = "$GITHUB_SHA" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping release because main has a newer commit."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Move release tag to current commit
+        if: steps.current.outputs.publish == 'true'
         run: |
           git tag --force latest "${GITHUB_SHA}"
           git push origin refs/tags/latest --force
 
       - name: Create or update release
-        uses: softprops/action-gh-release@v2
+        if: steps.current.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: latest
           name: Latest build

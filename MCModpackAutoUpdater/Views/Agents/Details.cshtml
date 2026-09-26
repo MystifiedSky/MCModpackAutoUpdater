@@ -63,11 +63,11 @@
         <input type="hidden" name="AgentNodeId" value="@Model.Agent.Id" />
         <div>
             <label for="CommandType">Command Type</label>
-            <input id="CommandType" name="CommandType" maxlength="100" placeholder="amp_console" required />
+            <input id="CommandType" name="CommandType" value="@Model.NewCommand.CommandType" maxlength="100" placeholder="amp_console" required />
         </div>
         <div class="wide">
             <label for="PayloadJson">Payload JSON</label>
-            <textarea id="PayloadJson" name="PayloadJson" rows="4" maxlength="20000">{}</textarea>
+            <textarea id="PayloadJson" name="PayloadJson" rows="4" maxlength="20000">@(Model.NewCommand.PayloadJson ?? "{}")</textarea>
         </div>
         <div class="wide actions">
             <button type="submit" class="primary" @(Model.Agent.Enabled ? null : "disabled")>Queue Command</button>
@@ -172,8 +172,14 @@
 @if (Model.AutoRefresh)
 {
     <script>
+        let hasUnsavedCommandInput = false;
+        document.querySelectorAll('form:not([method="get"]) input:not([type="hidden"]), form:not([method="get"]) textarea, form:not([method="get"]) select')
+            .forEach(function (field) {
+                field.addEventListener("input", function () { hasUnsavedCommandInput = true; });
+                field.addEventListener("change", function () { hasUnsavedCommandInput = true; });
+            });
         setInterval(function () {
-            if (!document.hidden) {
+            if (!document.hidden && !hasUnsavedCommandInput) {
                 window.location.reload();
             }
         }, 15000);

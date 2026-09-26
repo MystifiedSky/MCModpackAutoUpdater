@@ -42,6 +42,8 @@ rsync_filters=(
   --exclude='**/appsettings.*.json'
   --exclude='/agent-command-state*.json'
   --exclude='**/agent-command-state*.json'
+  --exclude='/agent-command-state*.json.tmp'
+  --exclude='**/agent-command-state*.json.tmp'
 )
 
 # Optional colon-separated paths relative to TARGET_DIR for custom journal or
@@ -53,7 +55,7 @@ if [[ -n "${MC_AGENT_PRESERVE_PATHS:-}" ]]; then
       echo "Invalid MC_AGENT_PRESERVE_PATHS entry: $preserved" >&2
       exit 1
     fi
-    rsync_filters+=("--exclude=/$preserved")
+    rsync_filters+=("--exclude=/$preserved" "--exclude=/${preserved%/}.tmp")
   done
 fi
 

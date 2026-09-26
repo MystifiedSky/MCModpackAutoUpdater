@@ -244,14 +244,42 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
         int projectId,
         CancellationToken cancellationToken)
     {
-        var response = await GetJsonAsync<CurseForgeListResponse<CurseForgeFileEntry>>(
-            $"https://www.curseforge.com/api/v1/mods/{projectId}/files?pageSize=50",
-            cancellationToken);
-        var files = response.Data?
+        const int pageSize = 50;
+        const int maxIndexedFiles = 10_000;
+        var filesById = new Dictionary<int, CurseForgeFileEntry>();
+        var index = 0;
+        while (index < maxIndexedFiles)
+        {
+            var response = await GetJsonAsync<CurseForgeListResponse<CurseForgeFileEntry>>(
+                $"https://www.curseforge.com/api/v1/mods/{projectId}/files?pageSize={pageSize}&index={index}",
+                cancellationToken);
+            var page = response.Data ?? [];
+            if (page.Count == 0)
+            {
+                break;
+            }
+
+            var newFiles = 0;
+            foreach (var file in page)
+            {
+                if (file.Id > 0 && filesById.TryAdd(file.Id, file))
+                {
+                    newFiles++;
+                }
+            }
+
+            index += page.Count;
+            if (newFiles == 0 || page.Count < pageSize ||
+                (response.Pagination?.TotalCount > 0 && index >= response.Pagination.TotalCount))
+            {
+                break;
+            }
+        }
+
+        var files = filesById.Values
             .Where(file => file.Status == CurseForgePublishedStatus)
             .OrderByDescending(file => file.DateCreated)
-            .ToList()
-            ?? [];
+            .ToList();
 
         return files.Count == 0
             ? throw new InvalidOperationException($"No published files found for CurseForge project {projectId}.")
@@ -507,6 +535,13 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
     private sealed class CurseForgeListResponse<TItem>
     {
         public List<TItem>? Data { get; set; }
+
+        public CurseForgePagination? Pagination { get; set; }
+    }
+
+    private sealed class CurseForgePagination
+    {
+        public int TotalCount { get; set; }
     }
 
     private sealed class CurseForgeFileEntry

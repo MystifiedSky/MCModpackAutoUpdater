@@ -177,39 +177,41 @@ public sealed class SelfUpdateCommandHandler : IAgentCommandHandler
 
     private static void StartDetachedShell(string command)
     {
-        if (OperatingSystem.IsWindows())
+        using var process = new Process
         {
-            var process = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "powershell",
-                    Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{command}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = false,
-                    RedirectStandardError = false
-                }
-            };
-
-            process.Start();
-            return;
-        }
-
-        var linuxProcess = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = "/bin/bash",
-                Arguments = $"-lc \"{command}\"",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = false,
-                RedirectStandardError = false
-            }
+            StartInfo = CreateDetachedShellStartInfo(command)
         };
 
-        linuxProcess.Start();
+        process.Start();
+    }
+
+    private static ProcessStartInfo CreateDetachedShellStartInfo(string command)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = OperatingSystem.IsWindows() ? "powershell" : "/bin/bash",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = false,
+            RedirectStandardError = false
+        };
+
+        if (OperatingSystem.IsWindows())
+        {
+            startInfo.ArgumentList.Add("-NoProfile");
+            startInfo.ArgumentList.Add("-ExecutionPolicy");
+            startInfo.ArgumentList.Add("Bypass");
+            startInfo.ArgumentList.Add("-Command");
+        }
+        else
+        {
+            startInfo.ArgumentList.Add("-lc");
+        }
+
+        // Passing the script as one argument keeps spaces and embedded quotes
+        // intact; ProcessStartInfo.Arguments requires shell-specific escaping.
+        startInfo.ArgumentList.Add(command);
+        return startInfo;
     }
 
     private static bool TryParsePayload(string payloadJson, out SelfUpdatePayload payload, out string errorMessage)

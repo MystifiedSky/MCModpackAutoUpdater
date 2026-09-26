@@ -2,6 +2,12 @@
 @{
     ViewData["Title"] = "Settings";
     ViewData["AgentOptions"] = Model.AgentOptions;
+    ViewDataDictionary ModpackViewData(string prefix, string action, string button)
+    {
+        var data = new ViewDataDictionary(ViewData) { ["Action"] = action, ["Button"] = button };
+        data.TemplateInfo.HtmlFieldPrefix = prefix;
+        return data;
+    }
 }
 
 <section class="page-head">
@@ -11,18 +17,22 @@
     </div>
 </section>
 
+<div asp-validation-summary="All" class="validation" role="alert"></div>
+
 <section class="settings-grid">
     <article class="panel">
         <h2>Runtime Scheduler</h2>
         <p class="muted">Live scheduler behavior stored in SQLite.</p>
         <form asp-action="SaveRuntime" method="post" class="form-grid">
-            <div asp-validation-summary="All" class="validation"></div>
+
             <label class="check wide">
                 <input asp-for="Runtime.RunOnStartup" name="RunOnStartup" />
+                <input type="hidden" name="RunOnStartup" value="false" />
                 <span>Run profiles on startup by default</span>
             </label>
             <label class="check wide">
                 <input asp-for="Runtime.ExitAfterStartupRun" name="ExitAfterStartupRun" />
+                <input type="hidden" name="ExitAfterStartupRun" value="false" />
                 <span>Exit after startup run</span>
             </label>
             <div>
@@ -43,9 +53,10 @@
         <h2>AMP Controller Settings</h2>
         <p class="muted">Used by profiles with restart mode <code>amp</code> and an AMP instance name.</p>
         <form asp-action="SaveAmpController" method="post" class="form-grid">
-            <div asp-validation-summary="All" class="validation"></div>
+
             <label class="check wide">
                 <input asp-for="AmpController.Enabled" name="Enabled" />
+                <input type="hidden" name="Enabled" value="false" />
                 <span>Enabled</span>
             </label>
             <div>
@@ -68,14 +79,17 @@
             </div>
             <label class="check">
                 <input asp-for="AmpController.ClearPassword" name="ClearPassword" />
+                <input type="hidden" name="ClearPassword" value="false" />
                 <span>Clear stored password</span>
             </label>
             <label class="check">
                 <input asp-for="AmpController.ClearToken" name="ClearToken" />
+                <input type="hidden" name="ClearToken" value="false" />
                 <span>Clear stored token</span>
             </label>
             <label class="check">
                 <input asp-for="AmpController.RememberMe" name="RememberMe" />
+                <input type="hidden" name="RememberMe" value="false" />
                 <span>Remember me</span>
             </label>
             <div class="wide actions">
@@ -90,6 +104,7 @@
         <form asp-action="SaveDirectAmp" method="post" class="form-grid">
             <label class="check wide">
                 <input asp-for="DirectAmpApi.Enabled" name="Enabled" />
+                <input type="hidden" name="Enabled" value="false" />
                 <span>Enabled</span>
             </label>
             <div>
@@ -108,14 +123,17 @@
             </div>
             <label class="check">
                 <input asp-for="DirectAmpApi.ClearPassword" name="ClearPassword" />
+                <input type="hidden" name="ClearPassword" value="false" />
                 <span>Clear stored password</span>
             </label>
             <label class="check">
                 <input asp-for="DirectAmpApi.ClearToken" name="ClearToken" />
+                <input type="hidden" name="ClearToken" value="false" />
                 <span>Clear stored token</span>
             </label>
             <label class="check">
                 <input asp-for="DirectAmpApi.RememberMe" name="RememberMe" />
+                <input type="hidden" name="RememberMe" value="false" />
                 <span>Remember me</span>
             </label>
             <div class="wide">
@@ -134,6 +152,7 @@
         <form asp-action="SaveDiscord" method="post" class="form-grid">
             <label class="check wide">
                 <input asp-for="Discord.Enabled" name="Enabled" />
+                <input type="hidden" name="Enabled" value="false" />
                 <span>Enabled</span>
             </label>
             <div class="wide">
@@ -143,6 +162,7 @@
             </div>
             <label class="check wide">
                 <input asp-for="Discord.ClearBotToken" name="ClearBotToken" />
+                <input type="hidden" name="ClearBotToken" value="false" />
                 <span>Clear stored bot token</span>
             </label>
             <div class="wide">
@@ -172,7 +192,7 @@
 
 <section class="panel">
     <h2>Add Modpack Profile</h2>
-    <partial name="_ModpackForm" model="Model.NewModpack" view-data='new ViewDataDictionary(ViewData) { ["Action"] = "CreateModpack", ["Button"] = "Create Profile" }' />
+    <partial name="_ModpackForm" model="Model.NewModpack" view-data='ModpackViewData("NewModpack", "CreateModpack", "Create Profile")' />
 </section>
 
 <section class="page-head compact">
@@ -195,6 +215,6 @@
                 <button type="submit" class="danger">Delete</button>
             </form>
         </div>
-        <partial name="_ModpackForm" model="profile" view-data='new ViewDataDictionary(ViewData) { ["Action"] = "UpdateModpack", ["Button"] = "Save Profile" }' />
+        <partial name="_ModpackForm" model="profile" view-data='ModpackViewData($"Modpack{profile.Id}", "UpdateModpack", "Save Profile")' />
     </section>
 }

@@ -110,6 +110,11 @@ builder.Services
     .AddEntityFrameworkStores<UpdaterIdentityDbContext>()
     .AddDefaultTokenProviders();
 
+builder.Services.Configure<SecurityStampValidatorOptions>(options =>
+{
+    options.ValidationInterval = TimeSpan.Zero;
+});
+
 builder.Services.ConfigureApplicationCookie(options =>
 {
     options.LoginPath = "/login";
@@ -170,6 +175,9 @@ app.UseAuthorization();
 app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Dashboard}/{action=Index}/{id?}");
+
+app.Lifetime.ApplicationStarted.Register(() =>
+    app.Logger.LogInformation("MCModpackAutoUpdater ready."));
 
 await app.RunAsync();
 

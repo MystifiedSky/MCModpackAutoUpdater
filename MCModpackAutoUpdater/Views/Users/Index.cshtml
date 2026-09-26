@@ -12,23 +12,34 @@
 </section>
 
 <section class="panel">
-    <table>
-        <thead>
-        <tr>
-            <th>User</th>
-            <th>Email</th>
-            <th>Roles</th>
-        </tr>
-        </thead>
-        <tbody>
-        @foreach (var user in Model.Users)
-        {
-            <tr>
-                <td>@user.UserName</td>
-                <td>@(user.Email ?? "")</td>
-                <td>@user.Roles</td>
-            </tr>
-        }
-        </tbody>
-    </table>
+    @if (Model.Users.Count == 0)
+    {
+        <p class="muted">No user accounts are configured.</p>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table>
+                <thead>
+                <tr>
+                    <th>User</th>
+                    <th>Email</th>
+                    <th>Roles</th>
+                    <th>Actions</th>
+                </tr>
+                </thead>
+                <tbody>
+                @foreach (var user in Model.Users)
+                {
+                    <tr>
+                        <td>@user.UserName</td>
+                        <td>@(user.Email ?? "")</td>
+                        <td>@user.Roles</td>
+                        <td><a class="button" asp-action="Edit" asp-route-id="@user.Id">Manage</a></td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        </div>
+    }
 </section>

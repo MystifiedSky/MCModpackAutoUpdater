@@ -33,6 +33,30 @@ public sealed class DashboardController : Controller
             .OrderBy(profile => profile.Name)
             .ToListAsync(cancellationToken);
 
+        var activeSyncCommands = await _dbContext.UpdaterAgentCommands
+            .AsNoTracking()
+            .Where(command =>
+                command.CommandType == "sync_modpack" &&
+                (command.Status == UpdaterAgentCommandStatus.Pending ||
+                 command.Status == UpdaterAgentCommandStatus.InProgress))
+            .Select(command => new
+            {
+                command.PayloadJson,
+                ProfileId = command.ModpackUpdateAudit == null
+                    ? (int?)null
+                    : command.ModpackUpdateAudit.ModpackProfileId
+            })
+            .ToListAsync(cancellationToken);
+        var activeProfileIds = new HashSet<int>();
+        foreach (var command in activeSyncCommands)
+        {
+            var profileId = command.ProfileId ?? UpdaterCommandService.ReadModpackId(command.PayloadJson);
+            if (profileId.HasValue)
+            {
+                activeProfileIds.Add(profileId.Value);
+            }
+        }
+
         var viewProfiles = new List<DashboardProfileViewModel>();
         foreach (var profile in profiles)
         {
@@ -41,7 +65,7 @@ public sealed class DashboardController : Controller
                 Id = profile.Id,
                 AgentName = profile.AgentNode?.Name,
                 IsAssignedAgentEnabled = profile.AgentNode?.Enabled == true,
-                HasActiveCommand = await _commandService.HasActiveSyncCommandForModpackAsync(profile.Id, cancellationToken),
+                HasActiveCommand = activeProfileIds.Contains(profile.Id),
                 Name = profile.Name,
                 Provider = profile.Provider,
                 Enabled = profile.Enabled,

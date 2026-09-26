@@ -49,7 +49,7 @@ public sealed class SettingsController : Controller
 
         if (!ModelState.IsValid)
         {
-            return View(nameof(Index), await BuildModelAsync(cancellationToken));
+            return await RedisplayAsync(model, "Runtime", cancellationToken);
         }
 
         var settings = await GetOrCreateRuntimeSettingsAsync(cancellationToken);
@@ -89,7 +89,7 @@ public sealed class SettingsController : Controller
 
         if (!ModelState.IsValid)
         {
-            return View(nameof(Index), await BuildModelAsync(cancellationToken));
+            return await RedisplayAsync(model, "AmpController", cancellationToken);
         }
 
         settings.Enabled = model.Enabled;
@@ -137,7 +137,7 @@ public sealed class SettingsController : Controller
 
         if (!ModelState.IsValid)
         {
-            return View(nameof(Index), await BuildModelAsync(cancellationToken));
+            return await RedisplayAsync(model, "DirectAmpApi", cancellationToken);
         }
 
         settings.Enabled = model.Enabled;
@@ -175,7 +175,7 @@ public sealed class SettingsController : Controller
 
         if (!ModelState.IsValid)
         {
-            return View(nameof(Index), await BuildModelAsync(cancellationToken));
+            return await RedisplayAsync(model, "Discord", cancellationToken);
         }
 
         settings.Enabled = model.Enabled;
@@ -204,6 +204,7 @@ public sealed class SettingsController : Controller
         ModpackSettingsFormModel model,
         CancellationToken cancellationToken)
     {
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
         ValidateModpack(model);
         if (!model.AgentNodeId.HasValue || !await _dbContext.UpdaterAgentNodes.AnyAsync(agent => agent.Id == model.AgentNodeId.Value, cancellationToken))
         {
@@ -219,12 +220,13 @@ public sealed class SettingsController : Controller
 
         if (!ModelState.IsValid)
         {
-            return View(nameof(Index), await BuildModelAsync(cancellationToken));
+            return await RedisplayAsync(model, "NewModpack", cancellationToken);
         }
 
         var utcNow = DateTime.UtcNow;
         _dbContext.UpdaterModpackProfiles.Add(ToEntity(model, utcNow));
         await _dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         TempData["Message"] = $"Modpack '{model.Name}' created.";
         return RedirectToAction(nameof(Index));
     }
@@ -235,11 +237,17 @@ public sealed class SettingsController : Controller
         ModpackSettingsFormModel model,
         CancellationToken cancellationToken)
     {
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
         ValidateModpack(model);
         var entity = await _dbContext.UpdaterModpackProfiles.FirstOrDefaultAsync(profile => profile.Id == model.Id, cancellationToken);
         if (entity is null)
         {
-            ModelState.AddModelError(string.Empty, "Modpack profile was not found.");
+            return NotFound();
+        }
+
+        if (await _commandService.HasActiveSyncCommandForModpackAsync(entity.Id, cancellationToken))
+        {
+            ModelState.AddModelError(string.Empty, "Wait for the pending or running sync to finish before editing this profile.");
         }
 
         if (!model.AgentNodeId.HasValue || !await _dbContext.UpdaterAgentNodes.AnyAsync(agent => agent.Id == model.AgentNodeId.Value, cancellationToken))
@@ -256,12 +264,14 @@ public sealed class SettingsController : Controller
 
         if (!ModelState.IsValid)
         {
-            return View(nameof(Index), await BuildModelAsync(cancellationToken));
+            return await RedisplayAsync(model, $"Modpack{model.Id}", cancellationToken);
         }
 
-        ApplyToEntity(entity!, model);
+        var targetChanged = ApplyToEntity(entity, model);
         await _dbContext.SaveChangesAsync(cancellationToken);
-        TempData["Message"] = $"Modpack '{model.Name}' updated.";
+        await transaction.CommitAsync(cancellationToken);
+        TempData["Message"] = $"Modpack '{model.Name}' updated." +
+            (targetChanged ? " The installed version was cleared because its source or destination changed." : string.Empty);
         return RedirectToAction(nameof(Index));
     }
 
@@ -291,7 +301,37 @@ public sealed class SettingsController : Controller
         return RedirectToAction(nameof(Index));
     }
 
-    private async Task<SettingsIndexViewModel> BuildModelAsync(CancellationToken cancellationToken)
+    private async Task<IActionResult> RedisplayAsync(object submitted, string formKey, CancellationToken cancellationToken)
+    {
+        // Give each editor its own validation keys so a failed save cannot fill
+        // every other profile editor with the submitted values.
+        var entries = ModelState.Select(pair => new
+        {
+            Key = pair.Key,
+            pair.Value?.RawValue,
+            pair.Value?.AttemptedValue,
+            Errors = pair.Value?.Errors.Select(error =>
+                string.IsNullOrEmpty(error.ErrorMessage) ? "The submitted value is invalid." : error.ErrorMessage).ToArray() ?? []
+        }).ToArray();
+        ModelState.Clear();
+        foreach (var entry in entries)
+        {
+            var scopedKey = string.IsNullOrEmpty(entry.Key) ? string.Empty : $"{formKey}.{entry.Key}";
+            if (entry.Key is not ("Password" or "Token" or "BotToken"))
+            {
+                ModelState.SetModelValue(scopedKey, entry.RawValue, entry.AttemptedValue);
+            }
+            foreach (var error in entry.Errors)
+            {
+                ModelState.AddModelError(scopedKey, error);
+            }
+        }
+
+        return View(nameof(Index), await BuildModelAsync(cancellationToken, submitted, formKey));
+    }
+
+    private async Task<SettingsIndexViewModel> BuildModelAsync(
+        CancellationToken cancellationToken, object? submitted = null, string? formKey = null)
     {
         var runtime = await GetOrCreateRuntimeSettingsAsync(cancellationToken);
         var ampApi = await GetOrCreateDirectAmpApiSettingsAsync(cancellationToken);
@@ -325,7 +365,7 @@ public sealed class SettingsController : Controller
 
         return new SettingsIndexViewModel
         {
-            Runtime = new RuntimeSettingsFormModel
+            Runtime = submitted as RuntimeSettingsFormModel ?? new RuntimeSettingsFormModel
             {
                 RunOnStartup = runtime.RunOnStartup,
                 ExitAfterStartupRun = runtime.ExitAfterStartupRun,
@@ -334,35 +374,40 @@ public sealed class SettingsController : Controller
             },
             AmpController = new AmpControllerSettingsFormModel
             {
-                Enabled = ampController.Enabled,
-                ControllerApiUrl = ampController.ControllerApiUrl,
-                Username = ampController.Username,
-                RememberMe = ampController.RememberMe,
+                Enabled = (submitted as AmpControllerSettingsFormModel)?.Enabled ?? ampController.Enabled,
+                ControllerApiUrl = submitted is AmpControllerSettingsFormModel submittedController ? submittedController.ControllerApiUrl : ampController.ControllerApiUrl,
+                Username = submitted is AmpControllerSettingsFormModel submittedControllerUser ? submittedControllerUser.Username : ampController.Username,
+                RememberMe = (submitted as AmpControllerSettingsFormModel)?.RememberMe ?? ampController.RememberMe,
+                ClearPassword = (submitted as AmpControllerSettingsFormModel)?.ClearPassword ?? false,
+                ClearToken = (submitted as AmpControllerSettingsFormModel)?.ClearToken ?? false,
                 HasPassword = !string.IsNullOrWhiteSpace(ampController.Password),
                 HasToken = !string.IsNullOrWhiteSpace(ampController.Token)
             },
             DirectAmpApi = new DirectAmpApiSettingsFormModel
             {
-                Enabled = ampApi.Enabled,
-                Username = ampApi.Username,
-                RememberMe = ampApi.RememberMe,
-                WarningMessageTemplate = ampApi.WarningMessageTemplate,
+                Enabled = (submitted as DirectAmpApiSettingsFormModel)?.Enabled ?? ampApi.Enabled,
+                Username = submitted is DirectAmpApiSettingsFormModel submittedDirect ? submittedDirect.Username : ampApi.Username,
+                RememberMe = (submitted as DirectAmpApiSettingsFormModel)?.RememberMe ?? ampApi.RememberMe,
+                WarningMessageTemplate = (submitted as DirectAmpApiSettingsFormModel)?.WarningMessageTemplate ?? ampApi.WarningMessageTemplate,
+                ClearPassword = (submitted as DirectAmpApiSettingsFormModel)?.ClearPassword ?? false,
+                ClearToken = (submitted as DirectAmpApiSettingsFormModel)?.ClearToken ?? false,
                 HasPassword = !string.IsNullOrWhiteSpace(ampApi.Password),
                 HasToken = !string.IsNullOrWhiteSpace(ampApi.Token)
             },
             Discord = new DiscordSettingsFormModel
             {
-                Enabled = discord.Enabled,
-                MessageTemplate = discord.MessageTemplate,
+                Enabled = (submitted as DiscordSettingsFormModel)?.Enabled ?? discord.Enabled,
+                MessageTemplate = (submitted as DiscordSettingsFormModel)?.MessageTemplate ?? discord.MessageTemplate,
+                ClearBotToken = (submitted as DiscordSettingsFormModel)?.ClearBotToken ?? false,
                 HasBotToken = !string.IsNullOrWhiteSpace(discord.BotToken)
             },
             DiscordFailures = discordFailures,
-            Modpacks = profiles.Select(ToForm).ToArray(),
-            NewModpack = new ModpackSettingsFormModel
+            Modpacks = profiles.Select(profile => submitted is ModpackSettingsFormModel edited &&
+                formKey == $"Modpack{profile.Id}" ? edited : ToForm(profile)).ToArray(),
+            NewModpack = formKey == "NewModpack" && submitted is ModpackSettingsFormModel created
+                ? created : new ModpackSettingsFormModel
             {
-                AgentNodeId = defaultAgentId,
-                InstallRootPath = "/home/amp/.ampdata/instances/",
-                OverrideDirectory = ".a UPDATE Files"
+                AgentNodeId = defaultAgentId
             },
             AgentOptions = agents.Select(agent => new AgentOptionViewModel
             {
@@ -515,8 +560,37 @@ public sealed class SettingsController : Controller
         return entity;
     }
 
-    private static void ApplyToEntity(UpdaterModpackProfile entity, ModpackSettingsFormModel model)
+    private static bool ApplyToEntity(UpdaterModpackProfile entity, ModpackSettingsFormModel model)
     {
+        var targetChanged = entity.Id != 0 &&
+            (entity.AgentNodeId != model.AgentNodeId ||
+             entity.InstallRootPath != model.InstallRootPath.Trim() ||
+             !string.Equals(entity.Provider, NormalizeProvider(model.Provider), StringComparison.OrdinalIgnoreCase) ||
+             entity.SourceReference != (Normalize(model.SourceReference) ?? string.Empty) ||
+             entity.ServerPackUrl != Normalize(model.ServerPackUrl) ||
+             entity.BuildServerPackFromClientFiles != model.BuildServerPackFromClientFiles);
+        var currentVersion = targetChanged ? string.Empty : Normalize(model.CurrentVersion) ?? string.Empty;
+        if (entity.CurrentVersion != currentVersion)
+        {
+            entity.CurrentVersionDisplay = null;
+        }
+        if (targetChanged)
+        {
+            entity.CurrentVersionDisplay = null;
+            entity.LastScheduledCheckDate = null;
+            entity.LastScheduledCheckUtc = null;
+            entity.LastDryRunCheckUtc = null;
+            entity.LastDryRunCheckSummary = null;
+            entity.LastDryRunCheckTargetVersion = null;
+            entity.LastDryRunCheckTargetVersionDisplay = null;
+            entity.LastQueuedUtc = null;
+            entity.LastRunUtc = null;
+            entity.LastSuccessUtc = null;
+            entity.LastSucceeded = false;
+            entity.LastSkipped = false;
+            entity.LastSummary = null;
+            entity.LastResultPayloadJson = null;
+        }
         entity.AgentNodeId = model.AgentNodeId;
         entity.UpdatedUtc = DateTime.UtcNow;
         entity.Enabled = model.Enabled;
@@ -529,7 +603,7 @@ public sealed class SettingsController : Controller
         entity.ServerPackExcludedPaths = NormalizePathListText(model.ServerPackExcludedPathsText);
         entity.ServerPackExcludedCurseForgeProjectIds = NormalizePositiveIntegerListText(model.ServerPackExcludedCurseForgeProjectIdsText);
         entity.VersionLock = Normalize(model.VersionLock);
-        entity.CurrentVersion = Normalize(model.CurrentVersion) ?? string.Empty;
+        entity.CurrentVersion = currentVersion;
         entity.InstallRootPath = model.InstallRootPath.Trim();
         entity.OverrideDirectory = Normalize(model.OverrideDirectory);
         entity.PreservedPaths = NormalizePathListText(model.PreservedPathsText);
@@ -545,10 +619,20 @@ public sealed class SettingsController : Controller
         entity.ForceFullSync = model.ForceFullSync;
         entity.SkipWarnings = model.SkipWarnings;
         entity.IgnoreCurrentVersion = model.IgnoreCurrentVersion;
+        return targetChanged;
     }
 
     private void ValidateModpack(ModpackSettingsFormModel model)
     {
+        var provider = NormalizeProvider(model.Provider);
+        if (!new[] { "CurseForge", "FTB", "Direct" }.Contains(provider, StringComparer.OrdinalIgnoreCase))
+        {
+            ModelState.AddModelError(nameof(model.Provider), "Choose CurseForge, FTB, or Direct URL.");
+        }
+        if (string.Equals(provider, "Direct", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(model.ServerPackUrl))
+        {
+            ModelState.AddModelError(nameof(model.ServerPackUrl), "Direct URL profiles require a server pack ZIP URL.");
+        }
         if (string.IsNullOrWhiteSpace(model.SourceReference) && string.IsNullOrWhiteSpace(model.ServerPackUrl))
         {
             ModelState.AddModelError(nameof(model.SourceReference), "Source reference or server pack URL is required.");

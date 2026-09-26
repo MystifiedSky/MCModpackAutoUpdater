@@ -17,7 +17,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MCAgent\MCAgent.csproj" />
-    <InternalsVisibleTo Include="MCModpackAutoUpdater.Tests" />
     <Content Update="appsettings.Local.json;appsettings.*.local.json" CopyToPublishDirectory="Never" />
   </ItemGroup>
 

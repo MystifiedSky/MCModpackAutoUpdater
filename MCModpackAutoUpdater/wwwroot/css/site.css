@@ -216,6 +216,11 @@ textarea {
     resize: vertical;
 }
 
+textarea[name="PayloadJson"] {
+    font-family: Consolas, "Courier New", monospace;
+    tab-size: 2;
+}
+
 pre {
     max-width: 520px;
     max-height: 260px;
@@ -289,6 +294,10 @@ button,
 .validation {
     color: var(--danger);
     background: #fdecec;
+}
+
+.validation-summary-valid {
+    display: none;
 }
 
 table {
