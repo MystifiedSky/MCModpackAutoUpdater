@@ -26,9 +26,9 @@ MCModpackAutoUpdater/
 ```
 
 There is also a focused agent guide at [MCAgent/README.md](MCAgent/README.md).
-For AMP installation and template maintenance, see [MCModpackAutoUpdater/amp-template/README.md](MCModpackAutoUpdater/amp-template/README.md).
+For AMP installation and template maintenance, see [AMP Template Install](#amp-template-install). The template files live on the [`amp-templates` branch](https://github.com/MystifiedSky/MCModpackAutoUpdater/tree/amp-templates).
 
-Start with **Choose a Setup Path** and **Quick Start** if you are new. The remainder of this file covers profiles, sync behavior, AMP, publishing, and troubleshooting; the linked guides are the detailed references for agent and template installation.
+Start with **Choose a Setup Path** and **Quick Start** if you are new. The remainder of this file covers profiles, sync behavior, AMP template installation, publishing, and troubleshooting; the linked agent guide covers remote installation in detail.
 
 ## Requirements
 
@@ -104,7 +104,7 @@ Save the profile, use **Check** to confirm the target version, then use **Check 
 
 ## AMP Template Install
 
-If you run the updater itself inside AMP, install the bundled AMP template before creating the updater instance. This is the easiest production path for AMP-managed environments because AMP can download the published runner ZIP, set the web UI port, set the database path, and manage the updater process like any other AMP application.
+If you run the updater itself inside AMP, install its template from the `amp-templates` branch before creating the updater instance. AMP can then download the published runner ZIP, set the web UI port, set the database path, and manage the updater process like any other AMP application.
 
 ### Add the Template Repository
 
@@ -130,17 +130,16 @@ If the template does not show up after `Fetch Latest`, refresh the browser and s
 
 ### Manual Template Install
 
-If you prefer to install the template files manually, the same files are also kept in:
+If you prefer to install the template files manually, check out the [`amp-templates` branch](https://github.com/MystifiedSky/MCModpackAutoUpdater/tree/amp-templates). Its repository root contains:
 
 ```text
-MCModpackAutoUpdater/amp-template/
-  mc-modpack-auto-updater.kvp
-  mc-modpack-auto-updaterconfig.json
-  mc-modpack-auto-updaterports.json
-  mc-modpack-auto-updaterupdates.json
+mc-modpack-auto-updater.kvp
+mc-modpack-auto-updaterconfig.json
+mc-modpack-auto-updaterports.json
+mc-modpack-auto-updaterupdates.json
 ```
 
-1. Copy all four files from `MCModpackAutoUpdater/amp-template/` into AMP's application template directory on the AMP controller or target ADS instance.
+1. Copy those four files from the `amp-templates` branch root into AMP's application template directory on the AMP controller or target ADS instance.
 2. Restart AMP or refresh the application template list so AMP detects the new template.
 3. Create a new instance using the `MCModpackAutoUpdater` application template.
 4. In the instance settings, confirm:
@@ -170,7 +169,7 @@ Use the source-based quick start above for development or running outside AMP.
 
 The app listener follows AMP's assigned Web UI port. When upgrading from template version 1, move any customized old `Web UI Port` application setting to AMP's instance port configuration before restarting; version 2 removes that duplicate setting.
 
-AMP fetches templates from the `amp-templates` branch, not from the `main` branch's `MCModpackAutoUpdater/amp-template/` folder. The release workflow updates application ZIPs only; it does not synchronize template files. When changing a template, update and validate both copies and the branch-level `manifest.json`.
+AMP fetches templates only from the root of the `amp-templates` branch. The `main` branch contains the application and its setup instructions; it has no template copy. The release workflow updates application ZIPs only. Make future template changes on `amp-templates` and keep its `manifest.json` with the four template files.
 
 ### Release Assets
 

@@ -70,6 +70,6 @@ Profiles are created in `/settings`. Choose an agent that can access the target 
 
 ## AMP Template
 
-The `amp-template` folder contains an AMP Generic Module template. The template settings include `Release Repository`, Linux/Windows release asset names, and `Web UI Database Path`. The listener uses the **Web UI** port assigned through AMP's instance port configuration; there is no separate application port setting.
+The [`amp-templates` branch](https://github.com/MystifiedSky/MCModpackAutoUpdater/tree/amp-templates) contains the AMP Generic Module template. Its settings include `Release Repository`, Linux/Windows release asset names, and `Web UI Database Path`. The listener uses the **Web UI** port assigned through AMP's instance port configuration; there is no separate application port setting.
 
-For AMP repository setup and template maintenance, see [the AMP template guide](amp-template/README.md) and the root [AMP Template Install](../README.md#amp-template-install) section. The `main` branch source files and AMP's `amp-templates` branch are maintained separately; pushing application changes to `main` does not update that branch.
+For AMP repository setup and template maintenance, see the root [AMP Template Install](../README.md#amp-template-install) section. Pushing application changes to `main` does not update `amp-templates`.
