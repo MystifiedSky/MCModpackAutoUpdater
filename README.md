@@ -98,7 +98,7 @@ Use a disposable server directory or a backup for the first sync. In `/settings`
 6. **Current Version:** leave it blank for the initial test.
 7. **Daily Check Time:** clear it until you have verified the manual workflow.
 8. **Run On Startup:** choose **Do not run at startup** for this test.
-9. **Restart Mode:** choose `none` for a disposable test directory with the Minecraft process stopped. New profiles default to `amp`, which requires AMP credentials and controller access. `none` applies files without stopping or starting the game process.
+9. **Restart Mode:** choose `none` for a disposable test directory with the Minecraft process stopped. New profiles default to `amp`, which requires AMP credentials and access to the controller or instance API. `none` applies files without stopping or starting the game process.
 
 Save the profile, use **Check** to confirm the target version, then use **Check + Queue** to apply it and watch the result in `/history`. A full sync replaces matching pack-managed top-level entries. Runtime paths such as worlds and server properties are preserved automatically; configure **Preserved Paths** for other files that must survive replacement. For a live AMP-managed instance, configure AMP control and select its AMP restart mode before queueing an update.
 
@@ -456,6 +456,8 @@ In this mode the agent asks the runner for runtime AMP config and can:
 - Auto-populate runtime settings such as Minecraft version, loader kind, loader version, release stream, and server JAR where supported.
 
 There is also a legacy direct instance fallback. Use `Direct AMP API Fallback` plus the profile `AMP Instance API URL` only when you need per-instance API orchestration instead of the controller path.
+
+The AMP Console and AMP Config tools in `/history` support both controller and direct instance connections. Choose an enabled AMP profile with an enabled assigned agent and configured credentials. Config writes require an exact value match on readback. Failed API reads are reported as failures; a successful read can still return no value for an empty or unknown setting.
 
 ## Custom Restart Hooks
 

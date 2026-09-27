@@ -15,12 +15,13 @@
 <section class="settings-grid">
     <article class="panel">
         <h2>AMP Console</h2>
+        <p class="muted">Targets must be enabled, assigned to an enabled agent, and have a configured AMP controller or direct API runtime.</p>
         <form asp-action="QueueAmpConsole" method="post" class="form-grid">
             <div>
                 <label asp-for="AmpConsole.ModpackId">Modpack</label>
                 <select asp-for="AmpConsole.ModpackId" name="ModpackId" required>
                     <option value="">Select modpack</option>
-                    @foreach (var modpack in Model.Modpacks)
+                    @foreach (var modpack in Model.AmpCommandModpacks)
                     {
                         <option value="@modpack.Id">@modpack.Name</option>
                     }
@@ -38,12 +39,13 @@
 
     <article class="panel">
         <h2>AMP Config</h2>
+        <p class="muted">Targets must be enabled, assigned to an enabled agent, and have a configured AMP controller or direct API runtime.</p>
         <form asp-action="QueueAmpConfig" method="post" class="form-grid">
             <div>
                 <label asp-for="AmpConfig.ModpackId">Modpack</label>
                 <select asp-for="AmpConfig.ModpackId" name="ModpackId" required>
                     <option value="">Select modpack</option>
-                    @foreach (var modpack in Model.Modpacks)
+                    @foreach (var modpack in Model.AmpCommandModpacks)
                     {
                         <option value="@modpack.Id">@modpack.Name</option>
                     }

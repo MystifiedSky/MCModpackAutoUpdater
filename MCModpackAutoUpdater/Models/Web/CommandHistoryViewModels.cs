@@ -10,6 +10,8 @@ public sealed class CommandHistoryIndexViewModel
 
     public required IReadOnlyList<CommandHistoryOptionViewModel> Modpacks { get; init; }
 
+    public required IReadOnlyList<CommandHistoryOptionViewModel> AmpCommandModpacks { get; init; }
+
     public required IReadOnlyList<string> Statuses { get; init; }
 
     public required IReadOnlyList<string> CommandTypes { get; init; }

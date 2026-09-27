@@ -72,6 +72,8 @@ $env:MC_AGENT__PollIntervalSeconds = "20"
 - `sync_modpack`: downloads and applies a server pack to the configured install path.
 - `amp_console`: sends a direct AMP console command to a modpack's configured AMP instance.
 - `amp_config`: reads or updates a setting on a modpack's configured AMP instance and verifies writes.
+
+The `amp_console` and `amp_config` commands use the runner's AMP controller credentials and instance name, or its enabled Direct AMP API settings and the profile's instance API URL. Direct mode calls the instance's `Core` API without an ADS proxy. Both commands require an AMP restart mode on the profile.
 - `self_update`: downloads and stages an update ZIP. Optional apply command hook.
 
 ### sync_modpack Behavior

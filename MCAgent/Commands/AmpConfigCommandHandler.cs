@@ -46,8 +46,11 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
         {
             var runtimeConfig = await _agentApiClient.GetAmpRuntimeConfigAsync(payload.ModpackId, cancellationToken);
             var plan = BuildPlan(runtimeConfig);
+            await EnsureAmpApiSessionIdAsync(plan, cancellationToken);
 
-            var beforeValue = await TryGetAmpConfigValueAsync(plan, payload.SettingNode, cancellationToken);
+            var beforeRead = await TryGetAmpConfigValueAsync(plan, payload.SettingNode, cancellationToken);
+            EnsureAmpConfigValueWasReadable(beforeRead, payload.SettingNode);
+            var beforeValue = beforeRead.Value;
             var availableValuesBefore = await TryGetAmpSettingValuesAsync(
                 plan,
                 payload.SettingNode,
@@ -65,7 +68,7 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                 writeAttempted = true;
                 var strategyErrors = new List<string>();
 
-                if (await TryApplySettingValueWithStrategyAsync(
+                if (plan.IsControllerMode && await TryApplySettingValueWithStrategyAsync(
                         plan,
                         payload.SettingNode,
                         payload.SettingValue!,
@@ -82,7 +85,7 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                     writeSucceeded = true;
                     verifiedByStrategy = "ADSModule/SetInstanceConfig";
                 }
-                else if (await TryApplySettingValueWithStrategyAsync(
+                else if (plan.IsControllerMode && await TryApplySettingValueWithStrategyAsync(
                              plan,
                              payload.SettingNode,
                              payload.SettingValue!,
@@ -140,7 +143,9 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                 }
             }
 
-            var afterValue = await TryGetAmpConfigValueAsync(plan, payload.SettingNode, cancellationToken);
+            var afterRead = await TryGetAmpConfigValueAsync(plan, payload.SettingNode, cancellationToken);
+            EnsureAmpConfigValueWasReadable(afterRead, payload.SettingNode);
+            var afterValue = afterRead.Value;
             var availableValuesAfter = await TryGetAmpSettingValuesAsync(
                 plan,
                 payload.SettingNode,
@@ -213,31 +218,49 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
 
     private static AmpConfigPlan BuildPlan(AgentAmpRuntimeConfigResponse runtimeConfig)
     {
-        if (string.IsNullOrWhiteSpace(runtimeConfig.ControllerApiUrl))
+        if (!string.IsNullOrWhiteSpace(runtimeConfig.ControllerApiUrl) &&
+            !string.IsNullOrWhiteSpace(runtimeConfig.InstanceName) &&
+            !string.IsNullOrWhiteSpace(runtimeConfig.Username) &&
+            !string.IsNullOrWhiteSpace(runtimeConfig.Password))
+        {
+            EnsureAbsoluteHttpUrl(runtimeConfig.ControllerApiUrl, "amp.controllerApiUrl");
+
+            return new AmpConfigPlan(
+                NormalizeAmpApiBaseUrl(runtimeConfig.ControllerApiUrl),
+                runtimeConfig.InstanceName.Trim(),
+                runtimeConfig.Username.Trim(),
+                runtimeConfig.Password,
+                runtimeConfig.Token ?? string.Empty,
+                runtimeConfig.RememberMe,
+                isControllerMode: true);
+        }
+
+        if (!runtimeConfig.DirectAmpApiEnabled)
         {
             throw new InvalidOperationException("AMP controller API URL is missing from runtime config.");
         }
 
-        if (string.IsNullOrWhiteSpace(runtimeConfig.InstanceName))
+        if (string.IsNullOrWhiteSpace(runtimeConfig.DirectAmpApiUrl))
         {
-            throw new InvalidOperationException("AMP instance name is missing from runtime config.");
+            throw new InvalidOperationException("Direct AMP API URL is missing from runtime config.");
         }
 
-        if (string.IsNullOrWhiteSpace(runtimeConfig.Username) ||
-            string.IsNullOrWhiteSpace(runtimeConfig.Password))
+        if (string.IsNullOrWhiteSpace(runtimeConfig.DirectAmpApiUsername) ||
+            string.IsNullOrWhiteSpace(runtimeConfig.DirectAmpApiPassword))
         {
-            throw new InvalidOperationException("AMP runtime credentials are incomplete.");
+            throw new InvalidOperationException("Direct AMP runtime credentials are incomplete.");
         }
 
-        EnsureAbsoluteHttpUrl(runtimeConfig.ControllerApiUrl, "amp.controllerApiUrl");
+        EnsureAbsoluteHttpUrl(runtimeConfig.DirectAmpApiUrl, "amp.directAmpApiUrl");
 
         return new AmpConfigPlan(
-            NormalizeAmpApiBaseUrl(runtimeConfig.ControllerApiUrl),
-            runtimeConfig.InstanceName.Trim(),
-            runtimeConfig.Username.Trim(),
-            runtimeConfig.Password,
-            runtimeConfig.Token ?? string.Empty,
-            runtimeConfig.RememberMe);
+            NormalizeAmpApiBaseUrl(runtimeConfig.DirectAmpApiUrl),
+            null,
+            runtimeConfig.DirectAmpApiUsername.Trim(),
+            runtimeConfig.DirectAmpApiPassword,
+            runtimeConfig.DirectAmpApiToken ?? string.Empty,
+            runtimeConfig.DirectAmpApiRememberMe,
+            isControllerMode: false);
     }
 
     private async Task ExecuteAmpControllerSetInstanceConfigAsync(
@@ -349,11 +372,13 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
             cancellationToken);
     }
 
-    private async Task<string?> TryGetAmpConfigValueAsync(
+    private async Task<AmpConfigValueRead> TryGetAmpConfigValueAsync(
         AmpConfigPlan plan,
         string settingNode,
         CancellationToken cancellationToken)
     {
+        var errors = new List<string>();
+        var readSucceeded = false;
         try
         {
             var configElement = await InvokeAmpInstanceCoreMethodAsync(
@@ -365,11 +390,12 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                     ["node"] = settingNode
                 },
                 cancellationToken);
+            readSucceeded = true;
 
             var configValue = TryExtractAmpConfigValue(configElement, settingNode);
             if (!string.IsNullOrWhiteSpace(configValue))
             {
-                return configValue;
+                return new AmpConfigValueRead(configValue, readSucceeded, null);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -378,6 +404,7 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
         }
         catch (Exception exception)
         {
+            errors.Add($"GetConfig: {exception.Message}");
             _logger.LogDebug(
                 exception,
                 "amp_config could not read current value for {SettingNode}.",
@@ -396,7 +423,11 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                 },
                 cancellationToken);
 
-            return TryExtractAmpConfigValue(configsElement, settingNode);
+            readSucceeded = true;
+            return new AmpConfigValueRead(
+                TryExtractAmpConfigValue(configsElement, settingNode),
+                readSucceeded,
+                null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -404,11 +435,25 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
         }
         catch (Exception exception)
         {
+            errors.Add($"GetConfigs: {exception.Message}");
             _logger.LogDebug(
                 exception,
                 "amp_config could not read current value from GetConfigs for {SettingNode}.",
                 settingNode);
-            return null;
+            return new AmpConfigValueRead(
+                null,
+                readSucceeded,
+                errors.Count == 0 ? null : string.Join(" | ", errors));
+        }
+    }
+
+    private static void EnsureAmpConfigValueWasReadable(AmpConfigValueRead read, string settingNode)
+    {
+        if (!read.ReadSucceeded)
+        {
+            throw new InvalidOperationException(
+                $"AMP could not read setting '{settingNode}' with GetConfig or GetConfigs" +
+                (string.IsNullOrWhiteSpace(read.Error) ? "." : $": {read.Error}"));
         }
     }
 
@@ -503,9 +548,10 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
         {
             await applyAsync();
 
-            var observedValue = await TryGetAmpConfigValueAsync(plan, settingNode, cancellationToken);
-            var verified = IsRequestedValueMatch(observedValue, settingValue);
-            writeAttempts.Add(new AmpConfigWriteAttempt(strategyName, true, verified, observedValue, null));
+            var observedRead = await TryGetAmpConfigValueAsync(plan, settingNode, cancellationToken);
+            EnsureAmpConfigValueWasReadable(observedRead, settingNode);
+            var verified = IsRequestedValueMatch(observedRead.Value, settingValue);
+            writeAttempts.Add(new AmpConfigWriteAttempt(strategyName, true, verified, observedRead.Value, null));
 
             if (verified)
             {
@@ -513,7 +559,7 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
             }
 
             strategyErrors.Add(
-                $"{strategyName} wrote '{settingValue}' but observed '{observedValue ?? "(unknown)"}'");
+                $"{strategyName} wrote '{settingValue}' but observed '{observedRead.Value ?? "(unknown)"}'");
             return false;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -535,6 +581,23 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
         IDictionary<string, object?> parameters,
         CancellationToken cancellationToken)
     {
+        if (!plan.IsControllerMode)
+        {
+            var sessionId = await EnsureAmpApiSessionIdAsync(plan, cancellationToken);
+            var payload = new Dictionary<string, object?>(parameters, StringComparer.Ordinal)
+            {
+                ["SESSIONID"] = sessionId
+            };
+            using var responseDocument = await PostAmpApiRequestAsync(
+                plan.ApiBaseUrl,
+                module,
+                method,
+                payload,
+                cancellationToken);
+            EnsureAmpApiResponseSucceeded(responseDocument.RootElement, module, method);
+            return UnwrapAmpApiResultElement(responseDocument.RootElement);
+        }
+
         var proxyServerKeys = await ResolveProxyServerKeysAsync(plan, cancellationToken);
         var proxyErrors = new List<string>();
 
@@ -661,6 +724,11 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
         AmpConfigPlan plan,
         CancellationToken cancellationToken)
     {
+        if (!plan.IsControllerMode || string.IsNullOrWhiteSpace(plan.InstanceName))
+        {
+            throw new InvalidOperationException("AMP controller calls require an instance name.");
+        }
+
         if (plan.InstanceReference is not null)
         {
             return plan.InstanceReference;
@@ -924,8 +992,7 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
             return false;
         }
 
-        return string.Equals(normalizedCurrentValue, normalizedRequestedValue, StringComparison.OrdinalIgnoreCase) ||
-               normalizedCurrentValue.Contains(normalizedRequestedValue, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(normalizedCurrentValue, normalizedRequestedValue, StringComparison.OrdinalIgnoreCase);
     }
 
     private static void CollectJsonStringTokens(JsonElement element, ISet<string> values)
@@ -1508,18 +1575,20 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
 
     private sealed class AmpConfigPlan(
         string apiBaseUrl,
-        string instanceName,
+        string? instanceName,
         string username,
         string password,
         string token,
-        bool rememberMe)
+        bool rememberMe,
+        bool isControllerMode)
     {
         public string ApiBaseUrl { get; } = apiBaseUrl;
-        public string InstanceName { get; } = instanceName;
+        public string? InstanceName { get; } = instanceName;
         public string Username { get; } = username;
         public string Password { get; } = password;
         public string Token { get; } = token;
         public bool RememberMe { get; } = rememberMe;
+        public bool IsControllerMode { get; } = isControllerMode;
         public string? SessionId { get; set; }
         public AmpInstanceReference? InstanceReference { get; set; }
         public IDictionary<string, string> ProxySessionIds { get; } =
@@ -1544,4 +1613,6 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
         bool Verified,
         string? ObservedValue,
         string? Error);
+
+    private sealed record AmpConfigValueRead(string? Value, bool ReadSucceeded, string? Error);
 }

@@ -42,11 +42,15 @@ public sealed class CommandHistoryController : Controller
             .OrderBy(agent => agent.Name)
             .Select(agent => new CommandHistoryOptionViewModel { Id = agent.Id, Name = agent.Name })
             .ToListAsync(cancellationToken);
-        var modpacks = await _dbContext.UpdaterModpackProfiles
+        var profileEntities = await _dbContext.UpdaterModpackProfiles
             .AsNoTracking()
+            .Include(profile => profile.AgentNode)
             .OrderBy(profile => profile.Name)
-            .Select(profile => new CommandHistoryOptionViewModel { Id = profile.Id, Name = profile.Name })
             .ToListAsync(cancellationToken);
+        var modpacks = profileEntities
+            .Select(profile => new CommandHistoryOptionViewModel { Id = profile.Id, Name = profile.Name })
+            .ToArray();
+        var ampCommandModpacks = await LoadEligibleAmpCommandProfilesAsync(profileEntities, cancellationToken);
         var statusValues = await _dbContext.UpdaterAgentCommands
             .AsNoTracking()
             .Select(command => command.Status)
@@ -174,6 +178,9 @@ public sealed class CommandHistoryController : Controller
             },
             Agents = agents,
             Modpacks = modpacks,
+            AmpCommandModpacks = ampCommandModpacks
+                .Select(profile => new CommandHistoryOptionViewModel { Id = profile.Id, Name = profile.Name })
+                .ToArray(),
             Statuses = statusMap.Values
                 .OrderBy(value => value, StringComparer.Ordinal)
                 .ToArray(),
@@ -429,7 +436,7 @@ public sealed class CommandHistoryController : Controller
         var profile = await LoadProfileForDebugCommandAsync(model.ModpackId.Value, cancellationToken);
         if (profile is null)
         {
-            TempData["Message"] = "Cannot queue AMP console command because the profile or assigned agent is unavailable.";
+            TempData["Message"] = "Cannot queue AMP console command because the profile, assigned agent, or AMP runtime is unavailable or disabled.";
             return RedirectToAction(nameof(Index));
         }
 
@@ -463,7 +470,7 @@ public sealed class CommandHistoryController : Controller
         var profile = await LoadProfileForDebugCommandAsync(model.ModpackId.Value, cancellationToken);
         if (profile is null)
         {
-            TempData["Message"] = "Cannot queue AMP config command because the profile or assigned agent is unavailable.";
+            TempData["Message"] = "Cannot queue AMP config command because the profile, assigned agent, or AMP runtime is unavailable or disabled.";
             return RedirectToAction(nameof(Index));
         }
 
@@ -493,14 +500,71 @@ public sealed class CommandHistoryController : Controller
         int modpackId,
         CancellationToken cancellationToken)
     {
-        return await _dbContext.UpdaterModpackProfiles
+        var profile = await _dbContext.UpdaterModpackProfiles
             .Include(profile => profile.AgentNode)
-            .FirstOrDefaultAsync(
-                profile => profile.Id == modpackId &&
-                           profile.AgentNode != null &&
-                           profile.AgentNode.Enabled,
-                cancellationToken);
+            .FirstOrDefaultAsync(profile => profile.Id == modpackId, cancellationToken);
+        if (profile is null)
+        {
+            return null;
+        }
+
+        var eligibleProfiles = await LoadEligibleAmpCommandProfilesAsync([profile], cancellationToken);
+        return eligibleProfiles.Count == 0 ? null : profile;
     }
+
+    private async Task<IReadOnlyList<UpdaterModpackProfile>> LoadEligibleAmpCommandProfilesAsync(
+        IReadOnlyList<UpdaterModpackProfile> profiles,
+        CancellationToken cancellationToken)
+    {
+        var controllerSettings = await _dbContext.UpdaterAmpControllerSettings
+            .AsNoTracking()
+            .FirstOrDefaultAsync(cancellationToken);
+        var directSettings = await _dbContext.UpdaterDirectAmpApiSettings
+            .AsNoTracking()
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return profiles
+            .Where(profile => IsEligibleAmpCommandProfile(profile, controllerSettings, directSettings))
+            .ToArray();
+    }
+
+    private static bool IsEligibleAmpCommandProfile(
+        UpdaterModpackProfile profile,
+        UpdaterAmpControllerSettings? controllerSettings,
+        UpdaterDirectAmpApiSettings? directSettings)
+    {
+        if (!profile.Enabled ||
+            profile.AgentNode is null ||
+            !profile.AgentNode.Enabled ||
+            (!string.Equals(profile.RestartMode, "amp", StringComparison.OrdinalIgnoreCase) &&
+             !string.Equals(profile.RestartMode, "amp_api", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        var hasController = controllerSettings is not null &&
+                            controllerSettings.Enabled &&
+                            !string.IsNullOrWhiteSpace(profile.AmpInstanceName);
+        if (hasController)
+        {
+            // The runtime endpoint selects controller mode first whenever the controller is enabled
+            // and this profile has an instance name. Do not advertise a target that would then fail
+            // because the controller configuration is incomplete.
+            return IsAbsoluteHttpUrl(controllerSettings!.ControllerApiUrl) &&
+                   !string.IsNullOrWhiteSpace(controllerSettings.Username) &&
+                   !string.IsNullOrWhiteSpace(controllerSettings.Password);
+        }
+
+        return directSettings is not null &&
+               directSettings.Enabled &&
+               IsAbsoluteHttpUrl(profile.AmpApiUrl) &&
+               !string.IsNullOrWhiteSpace(directSettings.Username) &&
+               !string.IsNullOrWhiteSpace(directSettings.Password);
+    }
+
+    private static bool IsAbsoluteHttpUrl(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+        (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
 
     private async Task QueueDebugCommandAsync(
         UpdaterModpackProfile profile,

@@ -107,31 +107,49 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
 
     private static AmpConsolePlan BuildPlan(AgentAmpRuntimeConfigResponse runtimeConfig)
     {
-        if (string.IsNullOrWhiteSpace(runtimeConfig.ControllerApiUrl))
+        if (!string.IsNullOrWhiteSpace(runtimeConfig.ControllerApiUrl) &&
+            !string.IsNullOrWhiteSpace(runtimeConfig.InstanceName) &&
+            !string.IsNullOrWhiteSpace(runtimeConfig.Username) &&
+            !string.IsNullOrWhiteSpace(runtimeConfig.Password))
+        {
+            EnsureAbsoluteHttpUrl(runtimeConfig.ControllerApiUrl, "amp.controllerApiUrl");
+
+            return new AmpConsolePlan(
+                NormalizeAmpApiBaseUrl(runtimeConfig.ControllerApiUrl),
+                runtimeConfig.InstanceName.Trim(),
+                runtimeConfig.Username.Trim(),
+                runtimeConfig.Password,
+                runtimeConfig.Token ?? string.Empty,
+                runtimeConfig.RememberMe,
+                isControllerMode: true);
+        }
+
+        if (!runtimeConfig.DirectAmpApiEnabled)
         {
             throw new InvalidOperationException("AMP controller API URL is missing from runtime config.");
         }
 
-        if (string.IsNullOrWhiteSpace(runtimeConfig.InstanceName))
+        if (string.IsNullOrWhiteSpace(runtimeConfig.DirectAmpApiUrl))
         {
-            throw new InvalidOperationException("AMP instance name is missing from runtime config.");
+            throw new InvalidOperationException("Direct AMP API URL is missing from runtime config.");
         }
 
-        if (string.IsNullOrWhiteSpace(runtimeConfig.Username) ||
-            string.IsNullOrWhiteSpace(runtimeConfig.Password))
+        if (string.IsNullOrWhiteSpace(runtimeConfig.DirectAmpApiUsername) ||
+            string.IsNullOrWhiteSpace(runtimeConfig.DirectAmpApiPassword))
         {
-            throw new InvalidOperationException("AMP runtime credentials are incomplete.");
+            throw new InvalidOperationException("Direct AMP runtime credentials are incomplete.");
         }
 
-        EnsureAbsoluteHttpUrl(runtimeConfig.ControllerApiUrl, "amp.controllerApiUrl");
+        EnsureAbsoluteHttpUrl(runtimeConfig.DirectAmpApiUrl, "amp.directAmpApiUrl");
 
         return new AmpConsolePlan(
-            NormalizeAmpApiBaseUrl(runtimeConfig.ControllerApiUrl),
-            runtimeConfig.InstanceName.Trim(),
-            runtimeConfig.Username.Trim(),
-            runtimeConfig.Password,
-            runtimeConfig.Token ?? string.Empty,
-            runtimeConfig.RememberMe);
+            NormalizeAmpApiBaseUrl(runtimeConfig.DirectAmpApiUrl),
+            instanceName: null,
+            runtimeConfig.DirectAmpApiUsername.Trim(),
+            runtimeConfig.DirectAmpApiPassword,
+            runtimeConfig.DirectAmpApiToken ?? string.Empty,
+            runtimeConfig.DirectAmpApiRememberMe,
+            isControllerMode: false);
     }
 
     private async Task<bool> TryDispatchConsoleCommandAsync(
@@ -141,8 +159,6 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
         CancellationToken cancellationToken)
     {
         var controllerSessionId = await EnsureAmpApiSessionIdAsync(plan, cancellationToken);
-        var proxyServerKeys = await ResolveProxyServerKeysAsync(plan, controllerSessionId, cancellationToken);
-
         var commandCandidates = new[]
         {
             new ConsoleApiCandidate("Core", "SendConsoleMessage", "message"),
@@ -152,6 +168,19 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
             new ConsoleApiCandidate("MinecraftModule", "SendConsoleCommand", "command"),
             new ConsoleApiCandidate("MinecraftModule", "SendConsoleCommand", "message")
         };
+
+        if (!plan.IsControllerMode)
+        {
+            return await TryDirectCandidatesAsync(
+                plan,
+                controllerSessionId,
+                consoleCommand,
+                commandCandidates,
+                attempts,
+                cancellationToken);
+        }
+
+        var proxyServerKeys = await ResolveProxyServerKeysAsync(plan, controllerSessionId, cancellationToken);
 
         foreach (var proxyServerKey in proxyServerKeys)
         {
@@ -225,6 +254,72 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
                     "command",
                     false,
                     TruncateForLog(exception.Message, 500)));
+            }
+        }
+
+        return false;
+    }
+
+    private async Task<bool> TryDirectCandidatesAsync(
+        AmpConsolePlan plan,
+        string sessionId,
+        string consoleCommand,
+        IEnumerable<ConsoleApiCandidate> candidates,
+        ICollection<AmpConsoleAttempt> attempts,
+        CancellationToken cancellationToken)
+    {
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                using var responseDocument = await PostAmpApiRequestAsync(
+                    plan.ApiBaseUrl,
+                    module: candidate.Module,
+                    method: candidate.Method,
+                    new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["SESSIONID"] = sessionId,
+                        [candidate.ParameterKey] = consoleCommand
+                    },
+                    cancellationToken);
+
+                EnsureAmpApiResponseSucceeded(responseDocument.RootElement, candidate.Module, candidate.Method);
+                attempts.Add(new AmpConsoleAttempt(
+                    $"{candidate.Module}/{candidate.Method} (direct-api)",
+                    candidate.ParameterKey,
+                    true,
+                    null));
+                return true;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (AmpApiHttpException exception) when (
+                exception.StatusCode is HttpStatusCode.NotFound or
+                    HttpStatusCode.MethodNotAllowed or
+                    HttpStatusCode.NotImplemented)
+            {
+                attempts.Add(new AmpConsoleAttempt(
+                    $"{candidate.Module}/{candidate.Method} (direct-api)",
+                    candidate.ParameterKey,
+                    false,
+                    exception.Message));
+            }
+            catch (Exception exception)
+            {
+                attempts.Add(new AmpConsoleAttempt(
+                    $"{candidate.Module}/{candidate.Method} (direct-api)",
+                    candidate.ParameterKey,
+                    false,
+                    TruncateForLog(exception.Message, 500)));
+                var outcome = exception is HttpRequestException
+                    ? "The request timed out or lost its connection; AMP may have executed it"
+                    : "AMP did not confirm the command was rejected before execution";
+                throw new ConsoleDispatchFailureException(
+                    $"{outcome}. No alternate console method was attempted for " +
+                    $"{candidate.Module}/{candidate.Method} (direct-api).",
+                    exception);
             }
         }
 
@@ -396,6 +491,11 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
         string controllerSessionId,
         CancellationToken cancellationToken)
     {
+        if (!plan.IsControllerMode || string.IsNullOrWhiteSpace(plan.InstanceName))
+        {
+            throw new InvalidOperationException("AMP controller proxy calls require an instance name.");
+        }
+
         var proxyServerKeys = new List<string>();
 
         using var responseDocument = await PostAmpApiRequestAsync(
@@ -964,15 +1064,16 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
 
     private sealed class AmpConsolePlan(
         string apiBaseUrl,
-        string instanceName,
+        string? instanceName,
         string username,
         string password,
         string token,
-        bool rememberMe)
+        bool rememberMe,
+        bool isControllerMode)
     {
         public string ApiBaseUrl { get; } = apiBaseUrl;
 
-        public string InstanceName { get; } = instanceName;
+        public string? InstanceName { get; } = instanceName;
 
         public string Username { get; } = username;
 
@@ -981,6 +1082,8 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
         public string Token { get; } = token;
 
         public bool RememberMe { get; } = rememberMe;
+
+        public bool IsControllerMode { get; } = isControllerMode;
 
         public string? SessionId { get; set; }
 
