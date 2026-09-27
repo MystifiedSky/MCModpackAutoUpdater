@@ -6,6 +6,8 @@ public sealed class AgentCommandPayload
 
     public string Status { get; init; } = string.Empty;
 
+    public string? ExecutionOwnerId { get; init; }
+
     public required string CommandType { get; init; }
 
     public required string PayloadJson { get; init; }

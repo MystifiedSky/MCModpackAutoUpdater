@@ -28,6 +28,7 @@ public sealed class AgentCommandCheckpointStore
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Dictionary<int, AgentCommandCheckpoint> _commands = new();
     private bool _loaded;
+    private string? _executionOwnerId;
 
     public AgentCommandCheckpointStore(
         IOptions<AgentOptions> options,
@@ -40,6 +41,53 @@ public sealed class AgentCommandCheckpointStore
     }
 
     public string FilePath => _filePath;
+
+    public async Task<string> GetExecutionOwnerIdAsync(CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            EnsureLoaded();
+            if (!string.IsNullOrWhiteSpace(_executionOwnerId))
+            {
+                return _executionOwnerId;
+            }
+
+            _executionOwnerId = Guid.NewGuid().ToString("N");
+            Persist();
+            return _executionOwnerId;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public FileStream AcquireExclusiveProcessLock()
+    {
+        var directory = Path.GetDirectoryName(_filePath);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        try
+        {
+            return new FileStream(
+                _filePath + ".lock",
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None,
+                bufferSize: 1,
+                FileOptions.WriteThrough);
+        }
+        catch (IOException exception)
+        {
+            throw new InvalidOperationException(
+                "Another MCAgent process already holds the command journal lock for this runner and token.",
+                exception);
+        }
+    }
 
     public async Task<AgentCommandCheckpoint?> GetAsync(AgentCommandPayload command)
     {
@@ -172,6 +220,18 @@ public sealed class AgentCommandCheckpointStore
                 return;
             }
 
+            if (!string.IsNullOrWhiteSpace(document.ExecutionOwnerId) &&
+                Guid.TryParseExact(document.ExecutionOwnerId, "N", out var ownerId))
+            {
+                _executionOwnerId = ownerId.ToString("N");
+            }
+            else if (!string.IsNullOrWhiteSpace(document.ExecutionOwnerId))
+            {
+                _logger.LogWarning(
+                    "Ignoring invalid MCAgent execution owner ID in command journal at {JournalPath}.",
+                    _filePath);
+            }
+
             foreach (var checkpoint in document.Commands ?? [])
             {
                 if (checkpoint is not null &&
@@ -205,6 +265,7 @@ public sealed class AgentCommandCheckpointStore
         {
             Version = 1,
             ScopeHash = _scopeHash,
+            ExecutionOwnerId = _executionOwnerId ??= Guid.NewGuid().ToString("N"),
             Commands = _commands.Values
                 .OrderBy(static checkpoint => checkpoint.CommandId)
                 .Select(Copy)
@@ -311,6 +372,8 @@ public sealed class AgentCommandCheckpointStore
         public int Version { get; set; }
 
         public string ScopeHash { get; set; } = string.Empty;
+
+        public string? ExecutionOwnerId { get; set; }
 
         public List<AgentCommandCheckpoint> Commands { get; set; } = [];
     }

@@ -25,19 +25,22 @@ The template settings are:
 - **Release Repository:** `MystifiedSky/MCModpackAutoUpdater`
 - **Linux Release Asset:** `mc-modpack-auto-updater-linux-x64.zip`
 - **Windows Release Asset:** `mc-modpack-auto-updater-win-x64.zip`
-- **Web UI Port:** usually `9090`; set it before starting the app and allow access to it through the host firewall/reverse proxy as needed.
 - **Web UI Database Path:** a persistent SQLite file path. Keep the database on persistent storage and back it up with the Data Protection key directory.
 
-Save the instance settings, run AMP's **Update** action to download and extract the package, then start the instance. The ZIP is self-contained and includes the .NET runtime. Open the endpoint AMP shows, usually `http://your-amp-host:9090/setup`.
+Select the **Web UI** port in AMP's instance port configuration before starting the app. Its default is `9090`, but AMP may allocate a different port to avoid a conflict. The listener and the displayed endpoint both use that assigned port. Allow access through the host firewall/reverse proxy as needed.
+
+Save the instance settings, run AMP's **Update** action to download and extract the package, then start the instance. The ZIP is self-contained and includes the .NET runtime. Open the endpoint AMP shows and visit `/setup`, usually `http://your-amp-host:9090/setup`.
 
 Opening `/setup` generates the one-time setup token and writes it to the AMP console/log. Copy it from the log, create the first admin account, and sign in. The template configures:
 
 ```text
-MC_UPDATER__WebUi__BindUrl=http://0.0.0.0:{{WebUIPort}}
+MC_UPDATER__WebUi__BindUrl=http://0.0.0.0:{{$WebUIPort}}
 MC_UPDATER__WebUi__DatabasePath={{WebUiDatabasePath}}
 ```
 
 The app creates its built-in `Local Runner` automatically. Use it when the updater process can access the Minecraft server files; otherwise, create a remote agent in `/agents` and install [MCAgent](../../MCAgent/README.md) on the server host.
+
+When upgrading from template version 1, move any customized **Web UI Port** application setting to AMP's instance port configuration before restarting. Version 2 removes that separate application setting so it cannot disagree with AMP's allocated port.
 
 ## Manual Template Install
 

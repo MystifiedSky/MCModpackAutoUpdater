@@ -213,6 +213,7 @@ public sealed class UpdaterDatabaseBootstrapService : IHostedService
                 "CompletedUtc" TEXT NULL,
                 "ResultSummary" TEXT NULL,
                 "ResultPayloadJson" TEXT NULL,
+                "ExecutionOwnerId" TEXT NULL,
                 CONSTRAINT "FK_UpdaterAgentCommands_UpdaterAgentNodes_AgentNodeId" FOREIGN KEY ("AgentNodeId") REFERENCES "UpdaterAgentNodes" ("Id") ON DELETE CASCADE
             );
             """,
@@ -292,6 +293,7 @@ public sealed class UpdaterDatabaseBootstrapService : IHostedService
         await EnsureColumnAsync(dbContext, "UpdaterModpackProfiles", "LastDryRunCheckTargetVersionDisplay", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(dbContext, "UpdaterDiscordAnnouncements", "NextAttemptUtc", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(dbContext, "UpdaterAgentCommands", "LocalExecutionResultJson", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(dbContext, "UpdaterAgentCommands", "ExecutionOwnerId", "TEXT NULL", cancellationToken);
     }
 
     private static async Task EnsureColumnAsync(

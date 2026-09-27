@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using MCAgent.Models.AgentApi;
@@ -41,6 +42,13 @@ public sealed class SelfUpdateCommandHandler : IAgentCommandHandler
         if (!TryParsePayload(command.PayloadJson, out var payload, out var parseError))
         {
             return AgentCommandExecutionResult.Failed(parseError);
+        }
+
+        var applyTemplate = payload.ApplyNow ? ResolveApplyTemplate(payload.ApplyCommand) : string.Empty;
+        if (!string.IsNullOrWhiteSpace(applyTemplate) && string.IsNullOrWhiteSpace(payload.ExpectedSha256))
+        {
+            return AgentCommandExecutionResult.Failed(
+                "self_update requires expectedSha256 before an update can be applied automatically.");
         }
 
         var workingRoot = ResolveWorkingRoot(_options.SelfUpdate.WorkDirectory);
@@ -88,15 +96,13 @@ public sealed class SelfUpdateCommandHandler : IAgentCommandHandler
             stagingDirectory
         });
 
-        var applyNow = payload.ApplyNow;
-        if (!applyNow)
+        if (!payload.ApplyNow)
         {
             return AgentCommandExecutionResult.Completed(
                 "Update package downloaded and staged. Apply is pending manual restart/deploy step.",
                 resultPayload);
         }
 
-        var applyTemplate = ResolveApplyTemplate(payload.ApplyCommand);
         if (string.IsNullOrWhiteSpace(applyTemplate))
         {
             return AgentCommandExecutionResult.Completed(
@@ -123,12 +129,19 @@ public sealed class SelfUpdateCommandHandler : IAgentCommandHandler
     private async Task DownloadAsync(string packageUrl, string destinationPath, CancellationToken cancellationToken)
     {
         using var client = _httpClientFactory.CreateClient(UpdateHttpClientName);
-        using var response = await client.GetAsync(packageUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (client.Timeout != Timeout.InfiniteTimeSpan)
+        {
+            timeout.CancelAfter(client.Timeout);
+        }
+
+        var downloadToken = timeout.Token;
+        using var response = await client.GetAsync(packageUrl, HttpCompletionOption.ResponseHeadersRead, downloadToken);
         response.EnsureSuccessStatusCode();
 
-        await using var sourceStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        await using var sourceStream = await response.Content.ReadAsStreamAsync(downloadToken);
         await using var destinationStream = File.Create(destinationPath);
-        await sourceStream.CopyToAsync(destinationStream, cancellationToken);
+        await sourceStream.CopyToAsync(destinationStream, downloadToken);
     }
 
     private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)
@@ -201,16 +214,17 @@ public sealed class SelfUpdateCommandHandler : IAgentCommandHandler
             startInfo.ArgumentList.Add("-NoProfile");
             startInfo.ArgumentList.Add("-ExecutionPolicy");
             startInfo.ArgumentList.Add("Bypass");
-            startInfo.ArgumentList.Add("-Command");
+            startInfo.ArgumentList.Add("-EncodedCommand");
+            // PowerShell decodes the UTF-16LE script itself. This preserves
+            // embedded quotes and paths with spaces through Windows process
+            // argument parsing without changing the template language.
+            startInfo.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(command)));
         }
         else
         {
             startInfo.ArgumentList.Add("-lc");
+            startInfo.ArgumentList.Add(command);
         }
-
-        // Passing the script as one argument keeps spaces and embedded quotes
-        // intact; ProcessStartInfo.Arguments requires shell-specific escaping.
-        startInfo.ArgumentList.Add(command);
         return startInfo;
     }
 
@@ -244,6 +258,14 @@ public sealed class SelfUpdateCommandHandler : IAgentCommandHandler
                 expectedHashElement.ValueKind == JsonValueKind.String)
             {
                 expectedSha256 = expectedHashElement.GetString()?.Trim();
+            }
+
+            if (!string.IsNullOrWhiteSpace(expectedSha256) &&
+                (expectedSha256.Length != 64 || !expectedSha256.All(Uri.IsHexDigit)))
+            {
+                payload = default;
+                errorMessage = "self_update expectedSha256 must contain exactly 64 hexadecimal characters.";
+                return false;
             }
 
             string? version = null;

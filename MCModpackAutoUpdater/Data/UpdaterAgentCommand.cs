@@ -28,5 +28,7 @@ public sealed class UpdaterAgentCommand
 
     public string? LocalExecutionResultJson { get; set; }
 
+    public string? ExecutionOwnerId { get; set; }
+
     public UpdaterModpackUpdateAudit? ModpackUpdateAudit { get; set; }
 }

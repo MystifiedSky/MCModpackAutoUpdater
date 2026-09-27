@@ -225,6 +225,19 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                 skipWarnings,
                 warningMinutes);
 
+            if (restartPlan.Enabled)
+            {
+                ValidateRestartCommandTemplates(
+                    restartPlan,
+                    installRoot,
+                    modpack.Name,
+                    command.Id,
+                    warningMinutes,
+                    requestedVersion,
+                    resolvedVersion,
+                    resolvedVersionDisplay);
+            }
+
             _logger.LogInformation(
                 "Executing sync_modpack #{CommandId}. Modpack={ModpackName}, Mode={Mode}, RestartMode={RestartMode}, InstallRoot={InstallRoot}, WorkDirectory={WorkDirectory}, Source={Source}, CurrentVersion={CurrentVersion}, TargetVersion={TargetVersion}.",
                 command.Id,
@@ -349,9 +362,45 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             var downloadedBytes = materializedSource.DownloadedBytes;
             var extractedFileCount = materializedSource.ExtractedFileCount;
             var contentRoot = materializedSource.ContentRoot;
+            var resolvedOverrideDirectory = ResolveOverrideDirectory(
+                installRoot,
+                Normalize(modpack.OverrideDirectory));
+            var overrideSourceDirectory = resolvedOverrideDirectory;
+            if (resolvedOverrideDirectory is not null)
+            {
+                var overrideSnapshotDirectory = Path.Combine(
+                    commandWorkDirectory,
+                    $"override-{Guid.NewGuid():N}");
+                EnsurePathHasNoReparsePointComponents(
+                    Path.GetPathRoot(resolvedOverrideDirectory)!, resolvedOverrideDirectory, "override source");
+                EnsurePathHasNoReparsePointComponents(
+                    Path.GetPathRoot(overrideSnapshotDirectory)!, overrideSnapshotDirectory, "override snapshot");
+                if (AreOverlappingDirectoryPaths(resolvedOverrideDirectory, overrideSnapshotDirectory))
+                {
+                    throw new InvalidOperationException(
+                        "Override directory overlaps its work snapshot. Configure an override directory outside the agent work directory.");
+                }
+
+                if (!Directory.Exists(resolvedOverrideDirectory))
+                {
+                    throw new InvalidOperationException(
+                        $"Override directory does not exist: {resolvedOverrideDirectory}");
+                }
+
+                EnsureNoReparsePointTree(resolvedOverrideDirectory, "override source");
+                overrideSourceDirectory = overrideSnapshotDirectory;
+                CopyDirectoryRecursive(
+                    resolvedOverrideDirectory,
+                    overrideSourceDirectory,
+                    new SyncApplyStats());
+            }
+
             Exception? syncException = null;
             Exception? startException = null;
+            var stopCommandAttempted = false;
             var stopCommandExecuted = false;
+            var applyStarted = false;
+            var applyCompleted = false;
 
             try
             {
@@ -400,16 +449,18 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
 
                 if (ampApiRestartPlan is not null)
                 {
+                    stopCommandAttempted = true;
                     await ExecuteAmpStopAsync(ampApiRestartPlan, cancellationToken);
+                    stopCommandExecuted = true;
+                    restartExecution.StopCommandExecuted = true;
                     if (ampApiRestartPlan.IsControllerMode)
                     {
                         await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
                     }
-                    stopCommandExecuted = true;
-                    restartExecution.StopCommandExecuted = true;
                 }
                 else if (restartPlan.Enabled)
                 {
+                    stopCommandAttempted = true;
                     await ExecuteShellCommandAsync(
                         restartPlan.StopCommandTemplate!,
                         installRoot,
@@ -431,6 +482,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                     preservedBackupRoot);
                 applyStats.BackedUpPreservedPaths = preservedPathBackups.Count;
 
+                applyStarted = true;
                 applyStats = forceFullSync
                     ? ampApiRestartPlan is not null
                         ? ApplyAmpManagedFullSync(contentRoot, installRoot, configuredPreservedPaths)
@@ -438,22 +490,15 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                     : ApplyOverlay(contentRoot, installRoot, configuredPreservedPaths);
                 applyStats.BackedUpPreservedPaths = preservedPathBackups.Count;
 
-                var resolvedOverrideDirectory = ResolveOverrideDirectory(installRoot, Normalize(modpack.OverrideDirectory));
-                if (resolvedOverrideDirectory is not null)
+                if (overrideSourceDirectory is not null)
                 {
-                    if (!Directory.Exists(resolvedOverrideDirectory))
-                    {
-                        throw new InvalidOperationException(
-                            $"Override directory does not exist: {resolvedOverrideDirectory}");
-                    }
-
                     _logger.LogInformation(
                         "Applying override directory for sync_modpack #{CommandId}: {OverrideDirectory}.",
                         command.Id,
                         resolvedOverrideDirectory);
 
                     var overrideStats = ApplyOverrideWithDeletes(
-                        resolvedOverrideDirectory,
+                        overrideSourceDirectory,
                         installRoot,
                         configuredPreservedPaths);
                     applyStats.CopiedFiles += overrideStats.CopiedFiles;
@@ -465,6 +510,8 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                     applyStats.DeleteMarkersSkippedInvalid += overrideStats.DeleteMarkersSkippedInvalid;
                     appliedOverrideDirectory = resolvedOverrideDirectory;
                 }
+
+                applyCompleted = true;
             }
             catch (Exception exception)
             {
@@ -472,7 +519,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             }
             finally
             {
-                if (preservedPathBackups.Count > 0)
+                if (applyStarted && preservedPathBackups.Count > 0)
                 {
                     try
                     {
@@ -486,6 +533,7 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                     }
                     catch (Exception exception)
                     {
+                        applyCompleted = false;
                         _logger.LogError(
                             exception,
                             "sync_modpack #{CommandId} failed while restoring configured preserved paths for Modpack={ModpackName}.",
@@ -504,9 +552,40 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                 {
                     try
                     {
-                        if (ampApiRestartPlan is not null)
+                        if (!applyStarted)
                         {
-                            var explicitAmpConfigValues = ResolveAmpConfigValues(
+                            // The stop completed, but no install mutation began.
+                            // Restore the unchanged server with a short bounded
+                            // token even when the host is shutting down.
+                            using var restartRecoveryTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                            await ExecuteRestartStartRecoveryAsync(
+                                ampApiRestartPlan,
+                                restartPlan,
+                                installRoot,
+                                modpack.Name,
+                                command.Id,
+                                warningMinutes,
+                                requestedVersion,
+                                resolvedVersion,
+                                resolvedVersionDisplay,
+                                restartExecution,
+                                restartRecoveryTimeout.Token);
+                        }
+                        else if (!applyCompleted)
+                        {
+                            _logger.LogError(
+                                "sync_modpack #{CommandId} stopped after a partial or failed file apply; leaving the server stopped for safety.",
+                                command.Id);
+                        }
+                        else
+                        {
+                            // Normal AMP and shell restart work remains bound to
+                            // the command token. Only the narrow recovery-start
+                            // path above may outlive command cancellation.
+                            var restartCancellationToken = cancellationToken;
+                            if (ampApiRestartPlan is not null)
+                            {
+                                var explicitAmpConfigValues = ResolveAmpConfigValues(
                                 modpack.AmpConfigValuesJson,
                                 requestedVersion,
                                 currentVersion,
@@ -515,221 +594,221 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                                 modpack.Name,
                                 warningMinutes,
                                 detectedMinecraftRuntime);
-                            var ampConfigValues = MergeAmpConfigValues(
+                                var ampConfigValues = MergeAmpConfigValues(
                                 autoAmpStartupConfigValues,
                                 explicitAmpConfigValues);
-                            var ampConfigValuesApplied = false;
-                            var autoAmpLoaderApplied = false;
-                            AutoAmpLoaderConfigApplyResult? autoAmpLoaderConfigResult = null;
-                            Exception? ampConfigException = null;
-                            try
-                            {
-                                if (ampConfigValues.Count > 0)
+                                var ampConfigValuesApplied = false;
+                                var autoAmpLoaderApplied = false;
+                                AutoAmpLoaderConfigApplyResult? autoAmpLoaderConfigResult = null;
+                                Exception? ampConfigException = null;
+                                try
                                 {
-                                    await ExecuteAmpConfigUpdateAsync(
-                                        ampApiRestartPlan,
-                                        ampConfigValues,
-                                        cancellationToken);
-                                    restartExecution.AmpConfigValuesApplied = ampConfigValues.Count;
-                                    ampConfigValuesApplied = true;
-                                }
-
-                                if (autoAmpLoaderConfigSelections.Count > 0)
-                                {
-                                    autoAmpLoaderConfigSelections = await TryRefreshAutoAmpLoaderConfigSelectionsAsync(
-                                        ampApiRestartPlan,
-                                        detectedMinecraftRuntime,
-                                        autoAmpLoaderConfigSelections,
-                                        cancellationToken);
-                                    autoAmpLoaderConfigResult = await ApplyAutoAmpLoaderConfigSelectionAsync(
-                                        ampApiRestartPlan,
-                                        autoAmpLoaderConfigSelections,
-                                        cancellationToken);
-                                    restartExecution.AmpAutoLoaderConfigApplied = true;
-                                    restartExecution.AmpAutoLoaderSettingNode = string.Join(
-                                        ", ",
-                                        autoAmpLoaderConfigResult.AppliedSettingNodes);
-                                    restartExecution.AmpAutoLoaderSettingValue =
-                                        autoAmpLoaderConfigResult.PrimarySelection.SettingValue;
-                                    restartExecution.AmpConfigValuesApplied += autoAmpLoaderConfigResult.AppliedSettingNodes.Count;
-                                    autoAmpLoaderApplied = true;
-                                }
-                            }
-                            catch (Exception exception)
-                            {
-                                ampConfigException = exception;
-                            }
-
-                            if (ampConfigException is not null &&
-                                !hasExplicitAmpConfigValues)
-                            {
-                                _logger.LogWarning(
-                                    ampConfigException,
-                                    "AMP auto loader config application failed but no explicit ampConfigValuesJson is configured; continuing with update/start.");
-                                restartExecution.AmpAutoLoaderConfigApplied = false;
-                                restartExecution.AmpAutoLoaderError ??=
-                                    TruncateForLog(ampConfigException.Message, 300);
-                                ampConfigException = null;
-                            }
-
-                            Exception? ampUpdateException = null;
-                            try
-                            {
-                                await ExecuteAmpUpdateApplicationAndWaitAsync(
-                                    ampApiRestartPlan,
-                                    cancellationToken,
-                                    operationDescription: "application update");
-                                restartExecution.AmpUpdateApplicationExecuted = true;
-                            }
-                            catch (Exception exception)
-                            {
-                                if (ampConfigException is null &&
-                                    autoAmpLoaderConfigResult?.PrimarySelection is not null &&
-                                    IsAmpUpdateApplicationRecoverableException(exception))
-                                {
-                                    try
+                                    if (ampConfigValues.Count > 0)
                                     {
-                                        await RecoverAmpUpdateApplicationByNudgingLoaderVersionAsync(
+                                        await ExecuteAmpConfigUpdateAsync(
                                             ampApiRestartPlan,
-                                            autoAmpLoaderConfigResult.PrimarySelection,
-                                            cancellationToken);
-                                        restartExecution.AmpUpdateApplicationExecuted = true;
-                                    }
-                                    catch (Exception recoveryException)
-                                    {
-                                        ampUpdateException = new InvalidOperationException(
-                                            $"AMP Core/UpdateApplication failed ({exception.Message}) and loader-version recovery failed ({recoveryException.Message}).",
-                                            recoveryException);
-                                    }
-                                }
-                                else if (ampConfigException is null)
-                                {
-                                    ampUpdateException = exception;
-                                }
-                                else
-                                {
-                                    ampConfigException = new InvalidOperationException(
-                                        $"AMP configuration reapply after application update failed ({exception.Message}).",
-                                        exception);
-                                }
-                            }
-
-                            if (ampUpdateException is null &&
-                                ampConfigException is null)
-                            {
-                                if (ampConfigValues.Count > 0)
-                                {
-                                    await ExecuteAmpConfigUpdateAsync(
-                                        ampApiRestartPlan,
-                                        ampConfigValues,
-                                        cancellationToken);
-                                    if (!ampConfigValuesApplied)
-                                    {
+                                            ampConfigValues,
+                                            restartCancellationToken);
                                         restartExecution.AmpConfigValuesApplied = ampConfigValues.Count;
                                         ampConfigValuesApplied = true;
                                     }
-                                }
 
-                                if (autoAmpLoaderConfigSelections.Count > 0)
-                                {
-                                    autoAmpLoaderConfigSelections = await TryRefreshAutoAmpLoaderConfigSelectionsAsync(
-                                        ampApiRestartPlan,
-                                        detectedMinecraftRuntime,
-                                        autoAmpLoaderConfigSelections,
-                                        cancellationToken);
-                                    autoAmpLoaderConfigResult = await ApplyAutoAmpLoaderConfigSelectionAsync(
-                                        ampApiRestartPlan,
-                                        autoAmpLoaderConfigSelections,
-                                        cancellationToken);
-                                    restartExecution.AmpAutoLoaderConfigApplied = true;
-                                    restartExecution.AmpAutoLoaderSettingNode = string.Join(
-                                        ", ",
-                                        autoAmpLoaderConfigResult.AppliedSettingNodes);
-                                    restartExecution.AmpAutoLoaderSettingValue =
-                                        autoAmpLoaderConfigResult.PrimarySelection.SettingValue;
-                                    restartExecution.AmpAutoLoaderError = null;
-                                    if (!autoAmpLoaderApplied)
+                                    if (autoAmpLoaderConfigSelections.Count > 0)
                                     {
+                                        autoAmpLoaderConfigSelections = await TryRefreshAutoAmpLoaderConfigSelectionsAsync(
+                                            ampApiRestartPlan,
+                                            detectedMinecraftRuntime,
+                                            autoAmpLoaderConfigSelections,
+                                            restartCancellationToken);
+                                        autoAmpLoaderConfigResult = await ApplyAutoAmpLoaderConfigSelectionAsync(
+                                            ampApiRestartPlan,
+                                            autoAmpLoaderConfigSelections,
+                                            restartCancellationToken);
+                                        restartExecution.AmpAutoLoaderConfigApplied = true;
+                                        restartExecution.AmpAutoLoaderSettingNode = string.Join(
+                                            ", ",
+                                            autoAmpLoaderConfigResult.AppliedSettingNodes);
+                                        restartExecution.AmpAutoLoaderSettingValue =
+                                            autoAmpLoaderConfigResult.PrimarySelection.SettingValue;
                                         restartExecution.AmpConfigValuesApplied += autoAmpLoaderConfigResult.AppliedSettingNodes.Count;
                                         autoAmpLoaderApplied = true;
                                     }
                                 }
-                            }
+                                catch (Exception exception)
+                                {
+                                    ampConfigException = exception;
+                                }
 
-                            Exception? ampStartException = null;
-                            if (ampUpdateException is null)
-                            {
+                                if (ampConfigException is not null &&
+                                    !hasExplicitAmpConfigValues)
+                                {
+                                    _logger.LogWarning(
+                                        ampConfigException,
+                                        "AMP auto loader config application failed but no explicit ampConfigValuesJson is configured; continuing with update/start.");
+                                    restartExecution.AmpAutoLoaderConfigApplied = false;
+                                    restartExecution.AmpAutoLoaderError ??=
+                                        TruncateForLog(ampConfigException.Message, 300);
+                                    ampConfigException = null;
+                                }
+
+                                Exception? ampUpdateException = null;
                                 try
                                 {
-                                    if (restartExecution.AmpUpdateApplicationExecuted)
-                                    {
-                                        await WaitForAmpApplicationIdleBeforeStartAsync(
-                                            ampApiRestartPlan,
-                                            cancellationToken,
-                                            operationDescription: "application update");
-                                    }
-                                    await ExecuteAmpStartAsync(ampApiRestartPlan, cancellationToken);
-                                    restartExecution.StartCommandExecuted = true;
-                                    await WaitForAmpApplicationReadyAfterStartAsync(
+                                    await ExecuteAmpUpdateApplicationAndWaitAsync(
                                         ampApiRestartPlan,
-                                        cancellationToken);
+                                        restartCancellationToken,
+                                        operationDescription: "application update");
+                                    restartExecution.AmpUpdateApplicationExecuted = true;
                                 }
                                 catch (Exception exception)
                                 {
-                                    ampStartException = exception;
+                                    if (ampConfigException is null &&
+                                        autoAmpLoaderConfigResult?.PrimarySelection is not null &&
+                                        IsAmpUpdateApplicationRecoverableException(exception))
+                                    {
+                                        try
+                                        {
+                                            await RecoverAmpUpdateApplicationByNudgingLoaderVersionAsync(
+                                                ampApiRestartPlan,
+                                                autoAmpLoaderConfigResult.PrimarySelection,
+                                                restartCancellationToken);
+                                            restartExecution.AmpUpdateApplicationExecuted = true;
+                                        }
+                                        catch (Exception recoveryException)
+                                        {
+                                            ampUpdateException = new InvalidOperationException(
+                                                $"AMP Core/UpdateApplication failed ({exception.Message}) and loader-version recovery failed ({recoveryException.Message}).",
+                                                recoveryException);
+                                        }
+                                    }
+                                    else if (ampConfigException is null)
+                                    {
+                                        ampUpdateException = exception;
+                                    }
+                                    else
+                                    {
+                                        ampConfigException = new InvalidOperationException(
+                                            $"AMP configuration reapply after application update failed ({exception.Message}).",
+                                            exception);
+                                    }
+                                }
+
+                                if (ampUpdateException is null &&
+                                    ampConfigException is null)
+                                {
+                                    if (ampConfigValues.Count > 0)
+                                    {
+                                        await ExecuteAmpConfigUpdateAsync(
+                                            ampApiRestartPlan,
+                                            ampConfigValues,
+                                            restartCancellationToken);
+                                        if (!ampConfigValuesApplied)
+                                        {
+                                            restartExecution.AmpConfigValuesApplied = ampConfigValues.Count;
+                                            ampConfigValuesApplied = true;
+                                        }
+                                    }
+
+                                    if (autoAmpLoaderConfigSelections.Count > 0)
+                                    {
+                                        autoAmpLoaderConfigSelections = await TryRefreshAutoAmpLoaderConfigSelectionsAsync(
+                                            ampApiRestartPlan,
+                                            detectedMinecraftRuntime,
+                                            autoAmpLoaderConfigSelections,
+                                            restartCancellationToken);
+                                        autoAmpLoaderConfigResult = await ApplyAutoAmpLoaderConfigSelectionAsync(
+                                            ampApiRestartPlan,
+                                            autoAmpLoaderConfigSelections,
+                                            restartCancellationToken);
+                                        restartExecution.AmpAutoLoaderConfigApplied = true;
+                                        restartExecution.AmpAutoLoaderSettingNode = string.Join(
+                                            ", ",
+                                            autoAmpLoaderConfigResult.AppliedSettingNodes);
+                                        restartExecution.AmpAutoLoaderSettingValue =
+                                            autoAmpLoaderConfigResult.PrimarySelection.SettingValue;
+                                        restartExecution.AmpAutoLoaderError = null;
+                                        if (!autoAmpLoaderApplied)
+                                        {
+                                            restartExecution.AmpConfigValuesApplied += autoAmpLoaderConfigResult.AppliedSettingNodes.Count;
+                                            autoAmpLoaderApplied = true;
+                                        }
+                                    }
+                                }
+
+                                Exception? ampStartException = null;
+                                if (ampUpdateException is null && ampConfigException is null)
+                                {
+                                    try
+                                    {
+                                        if (restartExecution.AmpUpdateApplicationExecuted)
+                                        {
+                                            await WaitForAmpApplicationIdleBeforeStartAsync(
+                                                ampApiRestartPlan,
+                                                restartCancellationToken,
+                                                operationDescription: "application update");
+                                        }
+                                        await ExecuteAmpStartAsync(ampApiRestartPlan, restartCancellationToken);
+                                        restartExecution.StartCommandExecuted = true;
+                                        await WaitForAmpApplicationReadyAfterStartAsync(
+                                            ampApiRestartPlan,
+                                            restartCancellationToken);
+                                    }
+                                    catch (Exception exception)
+                                    {
+                                        ampStartException = exception;
+                                    }
+                                }
+
+                                if (ampConfigException is not null &&
+                                    ampUpdateException is not null &&
+                                    ampStartException is not null)
+                                {
+                                    throw new InvalidOperationException(
+                                        $"AMP config step failed ({ampConfigException.Message}), AMP app update failed ({ampUpdateException.Message}), and AMP start failed ({ampStartException.Message}).",
+                                        ampStartException);
+                                }
+
+                                if (ampConfigException is not null && ampUpdateException is not null)
+                                {
+                                    throw new InvalidOperationException(
+                                        $"AMP config step failed ({ampConfigException.Message}) and AMP app update failed ({ampUpdateException.Message}).",
+                                        ampUpdateException);
+                                }
+
+                                if (ampConfigException is not null && ampStartException is not null)
+                                {
+                                    throw new InvalidOperationException(
+                                        $"AMP config step failed ({ampConfigException.Message}) and AMP start failed ({ampStartException.Message}).",
+                                        ampStartException);
+                                }
+
+                                if (ampUpdateException is not null && ampStartException is not null)
+                                {
+                                    throw new InvalidOperationException(
+                                        $"AMP app update failed ({ampUpdateException.Message}) and AMP start failed ({ampStartException.Message}).",
+                                        ampStartException);
+                                }
+
+                                if (ampStartException is not null)
+                                {
+                                    throw ampStartException;
+                                }
+
+                                if (ampUpdateException is not null)
+                                {
+                                    throw ampUpdateException;
+                                }
+
+                                if (ampConfigException is not null)
+                                {
+                                    throw ampConfigException;
                                 }
                             }
-
-                            if (ampConfigException is not null &&
-                                ampUpdateException is not null &&
-                                ampStartException is not null)
+                            else if (restartPlan.Enabled)
                             {
-                                throw new InvalidOperationException(
-                                    $"AMP config step failed ({ampConfigException.Message}), AMP app update failed ({ampUpdateException.Message}), and AMP start failed ({ampStartException.Message}).",
-                                    ampStartException);
-                            }
-
-                            if (ampConfigException is not null && ampUpdateException is not null)
-                            {
-                                throw new InvalidOperationException(
-                                    $"AMP config step failed ({ampConfigException.Message}) and AMP app update failed ({ampUpdateException.Message}).",
-                                    ampUpdateException);
-                            }
-
-                            if (ampConfigException is not null && ampStartException is not null)
-                            {
-                                throw new InvalidOperationException(
-                                    $"AMP config step failed ({ampConfigException.Message}) and AMP start failed ({ampStartException.Message}).",
-                                    ampStartException);
-                            }
-
-                            if (ampUpdateException is not null && ampStartException is not null)
-                            {
-                                throw new InvalidOperationException(
-                                    $"AMP app update failed ({ampUpdateException.Message}) and AMP start failed ({ampStartException.Message}).",
-                                    ampStartException);
-                            }
-
-                            if (ampStartException is not null)
-                            {
-                                throw ampStartException;
-                            }
-
-                            if (ampUpdateException is not null)
-                            {
-                                throw ampUpdateException;
-                            }
-
-                            if (ampConfigException is not null)
-                            {
-                                throw ampConfigException;
-                            }
-                        }
-                        else if (restartPlan.Enabled)
-                        {
-                            await ExecuteShellCommandAsync(
-                                restartPlan.StartCommandTemplate!,
-                                installRoot,
+                                await ExecuteShellCommandAsync(
+                                    restartPlan.StartCommandTemplate!,
+                                    installRoot,
                                     modpack.Name,
                                     command.Id,
                                     warningMinutes,
@@ -737,9 +816,10 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                                     resolvedVersion,
                                     resolvedVersionDisplay,
                                     phase: "start",
-                                    cancellationToken);
+                                    restartCancellationToken);
 
-                            restartExecution.StartCommandExecuted = true;
+                                restartExecution.StartCommandExecuted = true;
+                            }
                         }
                     }
                     catch (Exception exception)
@@ -747,6 +827,22 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                         startException = exception;
                     }
                 }
+            }
+
+            if (syncException is not null && stopCommandAttempted && !stopCommandExecuted)
+            {
+                syncException = new InvalidOperationException(
+                    $"The stop command did not complete, so the server state is unknown. Automatic restart was suppressed to avoid issuing a duplicate start. Inspect the server before retrying. StopError={syncException.Message}",
+                    syncException);
+            }
+            else if (syncException is not null && applyStarted && !applyCompleted)
+            {
+                var serverState = stopCommandExecuted
+                    ? "The server was left stopped for safety"
+                    : "No restart was attempted; the server's running state was not verified";
+                syncException = new InvalidOperationException(
+                    $"The file apply failed after target changes may have begun. {serverState}; inspect the installation before retrying. ApplyError={syncException.Message}",
+                    syncException);
             }
 
             if (syncException is not null)
@@ -3321,38 +3417,38 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         switch (element.ValueKind)
         {
             case JsonValueKind.Object:
-            {
-                foreach (var property in element.EnumerateObject())
                 {
-                    if (!string.IsNullOrWhiteSpace(property.Name))
+                    foreach (var property in element.EnumerateObject())
                     {
-                        values.Add(property.Name);
+                        if (!string.IsNullOrWhiteSpace(property.Name))
+                        {
+                            values.Add(property.Name);
+                        }
+
+                        CollectJsonStringTokens(property.Value, values);
                     }
 
-                    CollectJsonStringTokens(property.Value, values);
+                    break;
                 }
-
-                break;
-            }
             case JsonValueKind.Array:
-            {
-                foreach (var item in element.EnumerateArray())
                 {
-                    CollectJsonStringTokens(item, values);
-                }
+                    foreach (var item in element.EnumerateArray())
+                    {
+                        CollectJsonStringTokens(item, values);
+                    }
 
-                break;
-            }
+                    break;
+                }
             case JsonValueKind.String:
-            {
-                var value = element.GetString();
-                if (!string.IsNullOrWhiteSpace(value))
                 {
-                    values.Add(value);
-                }
+                    var value = element.GetString();
+                    if (!string.IsNullOrWhiteSpace(value))
+                    {
+                        values.Add(value);
+                    }
 
-                break;
-            }
+                    break;
+                }
         }
     }
 
@@ -3828,11 +3924,9 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         CurseForgeFileEntry parentFile,
         CancellationToken cancellationToken)
     {
-        if (parentFile.HasServerPack || parentFile.AdditionalServerPackFilesCount > 0)
-        {
-            return true;
-        }
-
+        // These fields are hints on the parent file. The additional-files
+        // endpoint is the authority for an actual published ZIP; stale hints
+        // must not make us select an unusable release.
         var additionalFiles = await GetCurseForgeAdditionalFilesAsync(projectId, parentFile.Id, cancellationToken);
         return additionalFiles.Count > 0;
     }
@@ -3858,7 +3952,9 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         using var client = _httpClientFactory.CreateClient(DownloadHttpClientName);
         EnsureDownloadClientHeaders(client);
 
-        using var response = await client.GetAsync(requestUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        // These API responses are small metadata documents. Buffer them so
+        // HttpClient.Timeout covers the response body as well as the headers.
+        using var response = await client.GetAsync(requestUrl, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -3874,15 +3970,47 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         using var client = _httpClientFactory.CreateClient(DownloadHttpClientName);
         EnsureDownloadClientHeaders(client);
 
-        using var response = await client.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        using var downloadTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (client.Timeout != Timeout.InfiniteTimeSpan)
+        {
+            // ResponseHeadersRead ends HttpClient's built-in timeout after
+            // headers. Keep the same bound active while copying the body to disk.
+            downloadTimeout.CancelAfter(client.Timeout);
+        }
 
-        await using var sourceStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        await using var destinationStream = File.Create(destinationPath);
-        await sourceStream.CopyToAsync(destinationStream, cancellationToken);
-        await destinationStream.FlushAsync(cancellationToken);
+        var downloadToken = downloadTimeout.Token;
+        var partialPath = destinationPath + $".{Guid.NewGuid():N}.partial";
+        try
+        {
+            using var response = await client.GetAsync(
+                downloadUrl,
+                HttpCompletionOption.ResponseHeadersRead,
+                downloadToken);
+            response.EnsureSuccessStatusCode();
 
-        return new FileInfo(destinationPath).Length;
+            await using var sourceStream = await response.Content.ReadAsStreamAsync(downloadToken);
+            await using (var destinationStream = File.Create(partialPath))
+            {
+                await sourceStream.CopyToAsync(destinationStream, downloadToken);
+                await destinationStream.FlushAsync(downloadToken);
+            }
+
+            File.Move(partialPath, destinationPath, overwrite: true);
+            return new FileInfo(destinationPath).Length;
+        }
+        catch
+        {
+            try
+            {
+                File.Delete(partialPath);
+            }
+            catch
+            {
+                // Preserve the original transfer error if partial-file cleanup fails.
+            }
+
+            throw;
+        }
     }
 
     private int ResolveWarningMinutes(int? warningMinutes)
@@ -5778,24 +5906,24 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
                 value = numericValue != 0;
                 return true;
             case JsonValueKind.String:
-            {
-                var rawValue = element.GetString()?.Trim();
-                if (string.Equals(rawValue, "true", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(rawValue, "1", StringComparison.Ordinal))
                 {
-                    value = true;
-                    return true;
-                }
+                    var rawValue = element.GetString()?.Trim();
+                    if (string.Equals(rawValue, "true", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(rawValue, "1", StringComparison.Ordinal))
+                    {
+                        value = true;
+                        return true;
+                    }
 
-                if (string.Equals(rawValue, "false", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(rawValue, "0", StringComparison.Ordinal))
-                {
-                    value = false;
-                    return true;
-                }
+                    if (string.Equals(rawValue, "false", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(rawValue, "0", StringComparison.Ordinal))
+                    {
+                        value = false;
+                        return true;
+                    }
 
-                return false;
-            }
+                    return false;
+                }
             default:
                 return false;
         }
@@ -6500,30 +6628,30 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         switch (element.ValueKind)
         {
             case JsonValueKind.Object:
-            {
-                yield return element;
-                foreach (var property in element.EnumerateObject())
                 {
-                    foreach (var nested in EnumerateJsonObjects(property.Value))
+                    yield return element;
+                    foreach (var property in element.EnumerateObject())
                     {
-                        yield return nested;
+                        foreach (var nested in EnumerateJsonObjects(property.Value))
+                        {
+                            yield return nested;
+                        }
                     }
-                }
 
-                yield break;
-            }
+                    yield break;
+                }
             case JsonValueKind.Array:
-            {
-                foreach (var item in element.EnumerateArray())
                 {
-                    foreach (var nested in EnumerateJsonObjects(item))
+                    foreach (var item in element.EnumerateArray())
                     {
-                        yield return nested;
+                        foreach (var nested in EnumerateJsonObjects(item))
+                        {
+                            yield return nested;
+                        }
                     }
-                }
 
-                yield break;
-            }
+                    yield break;
+                }
         }
     }
 
@@ -6690,10 +6818,9 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         if (OperatingSystem.IsWindows())
         {
             startInfo.FileName = "cmd.exe";
-            startInfo.ArgumentList.Add("/d");
-            startInfo.ArgumentList.Add("/s");
-            startInfo.ArgumentList.Add("/c");
-            startInfo.ArgumentList.Add(resolvedCommand);
+            // cmd.exe parses its /c script itself. ArgumentList applies CRT-style
+            // quote escaping, which cmd treats literally inside quoted paths.
+            startInfo.Arguments = $"/d /s /c \"{resolvedCommand}\"";
         }
         else
         {
@@ -6760,6 +6887,50 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         }
     }
 
+    private async Task ExecuteRestartStartRecoveryAsync(
+        AmpApiRestartPlan? ampApiRestartPlan,
+        RestartPlan restartPlan,
+        string installRoot,
+        string? modpackName,
+        int commandId,
+        int warningMinutes,
+        string? requestedVersion,
+        string? resolvedVersion,
+        string? resolvedVersionDisplay,
+        RestartExecutionState restartExecution,
+        CancellationToken cancellationToken)
+    {
+        if (ampApiRestartPlan is not null)
+        {
+            await WaitForAmpApplicationIdleBeforeStartAsync(
+                ampApiRestartPlan,
+                cancellationToken,
+                operationDescription: "application update");
+            await ExecuteAmpStartAsync(ampApiRestartPlan, cancellationToken);
+            restartExecution.StartCommandExecuted = true;
+            await WaitForAmpApplicationReadyAfterStartAsync(ampApiRestartPlan, cancellationToken);
+            return;
+        }
+
+        if (!restartPlan.Enabled)
+        {
+            return;
+        }
+
+        await ExecuteShellCommandAsync(
+            restartPlan.StartCommandTemplate!,
+            installRoot,
+            modpackName,
+            commandId,
+            warningMinutes,
+            requestedVersion,
+            resolvedVersion,
+            resolvedVersionDisplay,
+            phase: "start",
+            cancellationToken);
+        restartExecution.StartCommandExecuted = true;
+    }
+
     private static string ExpandCommandTemplate(
         string commandTemplate,
         string installRoot,
@@ -6782,6 +6953,60 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
             .Replace("{targetVersion}", resolvedVersion ?? string.Empty, StringComparison.Ordinal)
             .Replace("{targetVersionDisplay}", targetVersionDisplay, StringComparison.Ordinal);
     }
+
+    private static void ValidateRestartCommandTemplates(
+        RestartPlan restartPlan,
+        string installRoot,
+        string? modpackName,
+        int commandId,
+        int warningMinutes,
+        string? requestedVersion,
+        string? resolvedVersion,
+        string? resolvedVersionDisplay)
+    {
+        var targetVersionDisplay = Normalize(resolvedVersionDisplay) ??
+                                   Normalize(resolvedVersion) ??
+                                   "Latest";
+        var values = new (string Token, string Value)[]
+        {
+            ("{installRootPath}", installRoot),
+            ("{modpackName}", modpackName ?? string.Empty),
+            ("{commandId}", commandId.ToString(CultureInfo.InvariantCulture)),
+            ("{warningMinutes}", warningMinutes.ToString(CultureInfo.InvariantCulture)),
+            ("{requestedVersion}", requestedVersion ?? string.Empty),
+            ("{targetVersion}", resolvedVersion ?? string.Empty),
+            ("{targetVersionDisplay}", targetVersionDisplay)
+        };
+
+        foreach (var (phase, template) in new[]
+                 {
+                     ("warning", restartPlan.WarningCommandTemplate),
+                     ("stop", restartPlan.StopCommandTemplate),
+                     ("start", restartPlan.StartCommandTemplate)
+                 })
+        {
+            if (string.IsNullOrWhiteSpace(template))
+            {
+                continue;
+            }
+
+            foreach (var (token, value) in values)
+            {
+                if (template.Contains(token, StringComparison.Ordinal) &&
+                    value.Any(IsUnsafeShellTemplateValueCharacter))
+                {
+                    throw new InvalidOperationException(
+                        $"Restart {phase} command uses {token}, but its value contains shell control characters. " +
+                        "Use a value without shell syntax or remove that placeholder from the configured hook.");
+                }
+            }
+        }
+    }
+
+    private static bool IsUnsafeShellTemplateValueCharacter(char character) =>
+        char.IsControl(character) ||
+        character is '\'' or '"' or '`' or '$' or '&' or '|' or ';' or '<' or '>' or '^' or '%' or '!' or '(' or ')' or '{' or '}' ||
+        (!OperatingSystem.IsWindows() && character == '\\');
 
     private static void TryKillProcess(Process process)
     {
@@ -7324,6 +7549,18 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         return Path.IsPathRooted(overrideDirectory)
             ? Path.GetFullPath(overrideDirectory)
             : Path.GetFullPath(Path.Combine(installRoot, overrideDirectory));
+    }
+
+    private static bool AreOverlappingDirectoryPaths(string firstPath, string secondPath)
+    {
+        var first = Path.TrimEndingDirectorySeparator(Path.GetFullPath(firstPath));
+        var second = Path.TrimEndingDirectorySeparator(Path.GetFullPath(secondPath));
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        return string.Equals(first, second, comparison) ||
+               first.StartsWith(EnsureTrailingDirectorySeparator(second), comparison) ||
+               second.StartsWith(EnsureTrailingDirectorySeparator(first), comparison);
     }
 
     private static string ResolveRelativePathUnderRoot(string rootPath, string relativePath, string fieldName)
@@ -8251,37 +8488,37 @@ public sealed class SyncModpackCommandHandler : IAgentCommandHandler
         long DownloadedBytes,
         int ExtractedFileCount);
 
-private readonly record struct ResolvedServerPackSource(
-    string? DownloadUrl,
-    string SourceKind,
-    int? ProjectId,
-    int? ParentFileId,
-    int? ServerPackFileId,
-    int? FtbPackId,
-    int? FtbVersionId,
-    DetectedMinecraftRuntime? DetectedRuntime,
-    string? DisplayVersion,
-    string? SelectedVersion,
-    string[]? GeneratedServerPackExcludedPaths,
-    int[]? GeneratedServerPackExcludedCurseForgeProjectIds);
+    private readonly record struct ResolvedServerPackSource(
+        string? DownloadUrl,
+        string SourceKind,
+        int? ProjectId,
+        int? ParentFileId,
+        int? ServerPackFileId,
+        int? FtbPackId,
+        int? FtbVersionId,
+        DetectedMinecraftRuntime? DetectedRuntime,
+        string? DisplayVersion,
+        string? SelectedVersion,
+        string[]? GeneratedServerPackExcludedPaths,
+        int[]? GeneratedServerPackExcludedCurseForgeProjectIds);
 
-private sealed record DetectedMinecraftRuntime(
-    string? MinecraftVersion,
-    string LoaderId,
-    string LoaderKind,
-    string LoaderVersion);
+    private sealed record DetectedMinecraftRuntime(
+        string? MinecraftVersion,
+        string LoaderId,
+        string LoaderKind,
+        string LoaderVersion);
 
-private sealed record AutoAmpLoaderConfigApplyResult(
-    AutoAmpLoaderConfigSelection PrimarySelection,
-    IReadOnlyList<string> AppliedSettingNodes);
+    private sealed record AutoAmpLoaderConfigApplyResult(
+        AutoAmpLoaderConfigSelection PrimarySelection,
+        IReadOnlyList<string> AppliedSettingNodes);
 
-private sealed record AutoAmpLoaderConfigSelection(
-    string SettingNode,
-    string SettingValue,
-    string LoaderKind,
-    string LoaderVersion,
-    string LoaderId);
+    private sealed record AutoAmpLoaderConfigSelection(
+        string SettingNode,
+        string SettingValue,
+        string LoaderKind,
+        string LoaderVersion,
+        string LoaderId);
 
-private sealed record PreservedPathBackup(
-    string RelativePath);
+    private sealed record PreservedPathBackup(
+        string RelativePath);
 }

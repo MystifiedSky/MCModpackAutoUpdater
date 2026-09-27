@@ -51,6 +51,8 @@ Default startup settings are in [appsettings.json](appsettings.json). Important 
 
 Operational settings such as scheduling, AMP credentials, Discord, agents, and modpack profiles are managed in the web UI and stored in SQLite. Profiles are not imported from appsettings or an AMP template.
 
+Run one web runner per database. The app holds a `.lock` file beside the database and refuses a second runner using the same path. The lock is released when the process exits; the file itself may remain and should not be removed while the runner is running.
+
 ## Profile Notes
 
 Profiles are created in `/settings`. Choose an agent that can access the target install directory and use an absolute path as seen by that agent.
@@ -68,6 +70,6 @@ Profiles are created in `/settings`. Choose an agent that can access the target 
 
 ## AMP Template
 
-The `amp-template` folder contains an AMP Generic Module template. The template settings include `Release Repository`, Linux/Windows release asset names, `Web UI Port`, and `Web UI Database Path`. It passes the port and database path to the app at startup.
+The `amp-template` folder contains an AMP Generic Module template. The template settings include `Release Repository`, Linux/Windows release asset names, and `Web UI Database Path`. The listener uses the **Web UI** port assigned through AMP's instance port configuration; there is no separate application port setting.
 
 For AMP repository setup and template maintenance, see [the AMP template guide](amp-template/README.md) and the root [AMP Template Install](../README.md#amp-template-install) section. The `main` branch source files and AMP's `amp-templates` branch are maintained separately; pushing application changes to `main` does not update that branch.

@@ -103,17 +103,20 @@ $env:MC_AGENT__PollIntervalSeconds = "20"
 - Overlay mode (`forceFullSync=false`) copies files without deleting existing pack-managed entries.
 - These paths are always preserved: `world*`, `logs*`, `backups*`, `crash-reports*`, `server.properties*`, `eula*`, `ops*`, `whitelist*`, bans, and `usercache*`.
 - `modpack.preservedPaths` (optional array of install-root-relative paths) is snapshotted before apply and restored after sync/override work completes. Use this for runtime data that a pack incorrectly stores inside pack-managed folders like `kubejs/AOFEconomy`.
+- Overrides are validated and staged before the stop phase. With restart orchestration enabled, a failure applying files or restoring preserved paths leaves the server stopped for inspection. Pack files do not have a full rollback; check the failed command and repair or reapply the pack before starting it. Without restart orchestration, stop and start the server yourself.
 - Override directory supports delete markers: any file ending with `.DELETE` is treated as a delete instruction and is not copied.
   Example: `mods/ftb-ranks-neoforge-*.jar.DELETE` deletes matching entries from `<installRoot>/mods`.
   On Windows, use safe tokens in filenames: `__STAR__` -> `*`, `__Q__` -> `?`.
   Example on Windows: `mods/ftb-ranks-neoforge-__STAR__.jar.DELETE`.
-- ZIP entries that traverse outside extraction or represent symbolic links are rejected. The configured install root must be a physical directory, and applying updates through an existing symbolic link/reparse point below it is also rejected.
+- ZIP entries that traverse outside extraction or represent symbolic links are rejected. The configured install root must be a physical directory, and applying updates through an existing symbolic link/reparse point below it is also rejected. Override sources and their staging paths must use physical directories throughout their paths; junction/symlink aliases and overlapping source/staging directories are rejected before the stop phase.
 
 ### Command Recovery
 
-The agent writes a local command journal before it acknowledges a command, before it enters a handler, and before it submits a final result. If a completion request fails transiently, the journal retries that exact result on the next poll or after process restart rather than running the update again. If the agent restarts while a command is only marked in progress, it reports an interrupted failure with an inspect-before-retry message. Check the target server and agent logs before manually retrying such a command: the filesystem or AMP side effects may already have happened.
+The agent writes a local command journal before it acknowledges a command, before it enters a handler, and before it submits a final result. Its instance ID is stored in that journal and sent to the runner with requests, so another instance cannot claim or complete its active commands. If a completion request fails transiently, the journal retries that exact result on the next poll or after process restart rather than running the update again. After a restart, a matching journal entry lets the agent report an interrupted command without repeating its side effects. Check the target server and agent logs before manually retrying such a command: the filesystem or AMP side effects may already have happened.
 
-Run only one MCAgent process for a runner/token pair. The journal is scoped to that pair but is not a distributed lock and cannot coordinate multiple processes sharing the same credentials. Keep the journal file private and persistent across service restarts. If `CommandStatePath` is set explicitly, do not point different runner/token pairs at the same file. A completed result that was accepted by the runner but whose response was lost can remain in the local journal if the runner no longer returns that command; the agent has no completed-command listing with which to prune it automatically.
+Run only one MCAgent process for a runner/token pair. The agent holds an exclusive `.lock` file beside its journal for its lifetime; a second process using the same journal cannot start. Keep the journal private and persistent across service restarts, and do not copy a journal to another agent installation. If `CommandStatePath` is set explicitly, use a different file for each runner/token pair. Stop old workers before upgrading both runner and agent to use command ownership; older agents retain their legacy recovery behavior for commands without an owner.
+
+If the journal is missing or damaged, the agent leaves unknown in-progress work alone. Stop the affected agent, inspect the server and logs, then use an admin account to choose **Mark Interrupted** on the command's history row. This marks it failed without stopping any process; use **Retry** only after the target is safe to update. A completed result that was accepted by the runner but whose response was lost can remain in the local journal if the runner no longer returns that command; the agent has no completed-command listing with which to prune it automatically.
 
 `appsettings.Development.json` and `appsettings.Local.json` are not copied to publish output. User secrets and `appsettings.Development.json` load only when `DOTNET_ENVIRONMENT=Development`; no project launch profile selects that environment automatically. Supply deployment settings through environment variables or a private configuration file managed outside the publish package.
 
@@ -130,6 +133,10 @@ Restart command templates can use:
 - `{requestedVersion}`
 - `{targetVersion}`
 - `{targetVersionDisplay}`
+
+Shell hook values containing shell syntax or control characters are rejected before warnings, stopping, or applying files. Only tokens used by a configured hook are checked. Spaces and Windows path separators are supported; quote path tokens in your templates. Hook templates themselves are trusted local commands, so keep them in private configuration controlled by an administrator.
+
+AMP console commands are not automatically retried through alternate endpoints after a timeout or network error, because AMP may already have executed the command. Check the server console before resending. Alternate endpoints are tried only when AMP explicitly reports that an endpoint or method is unavailable.
 
 AMP config JSON values support:
 
@@ -157,12 +164,12 @@ AMP config JSON values support:
 Payload fields:
 
 - `packageUrl` (required)
-- `expectedSha256` (optional, exactly 64 hexadecimal characters)
+- `expectedSha256` (exactly 64 hexadecimal characters; optional for staging, required before executing an apply hook)
 - `version` (optional)
 - `applyNow` (optional, default `false`)
 - `applyCommand` (optional; ignored unless `AllowApplyCommandFromPayload=true`)
 
-With the shipped defaults, this request stages the update but does not apply it. For unattended application, set `SelfUpdate.ApplyCommandTemplate` in trusted local agent configuration and send `applyNow: true`. A fixed command can be `bash /opt/mc-agent/scripts/apply-update-linux.sh "{stagingDir}" "{baseDir}" "mc-agent"`. The service account needs write access to the target directory, `rsync`, and permission to restart that systemd service. Keep `AllowApplyCommandFromPayload=false` unless you explicitly want queued payloads to choose a shell command.
+With the shipped defaults, this request stages the update but does not apply it. For unattended application, set `SelfUpdate.ApplyCommandTemplate` in trusted local agent configuration and send `applyNow: true` with the package's trusted `expectedSha256`. A fixed command can be `bash /opt/mc-agent/scripts/apply-update-linux.sh "{stagingDir}" "{baseDir}" "mc-agent"`. The service account needs write access to the target directory, `rsync`, and permission to restart that systemd service. Keep `AllowApplyCommandFromPayload=false` unless you explicitly want queued payloads to choose a shell command.
 
 ## Linux Service (systemd)
 

@@ -44,18 +44,32 @@ public sealed class UpdaterCommandService
         CancellationToken cancellationToken)
     {
         await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
-        if (!await _dbContext.UpdaterModpackProfiles.AsNoTracking()
-                .AnyAsync(profile => profile.Id == modpack.Id && profile.AgentNodeId == agent.Id, cancellationToken))
+        var currentProfile = await _dbContext.UpdaterModpackProfiles.AsNoTracking()
+            .FirstOrDefaultAsync(profile => profile.Id == modpack.Id, cancellationToken);
+        if (currentProfile is null || currentProfile.AgentNodeId != agent.Id)
         {
             throw new InvalidOperationException("The profile no longer exists or its assigned agent changed. Refresh before queueing an update.");
         }
+
+        if (!HasSameSyncTarget(modpack, currentProfile))
+        {
+            throw new InvalidOperationException("The modpack profile changed while its update was being prepared. Refresh and check the profile again before queueing.");
+        }
+
+        var currentAgentEnabled = await _dbContext.UpdaterAgentNodes.AsNoTracking()
+            .AnyAsync(current => current.Id == agent.Id && current.Enabled, cancellationToken);
+        if (!currentAgentEnabled)
+        {
+            throw new InvalidOperationException("The assigned agent is missing or disabled.");
+        }
+
         if (await HasActiveSyncCommandForModpackAsync(modpack.Id, cancellationToken))
         {
             throw new DuplicateSyncCommandException();
         }
-        if (!agent.Enabled)
+        if (!currentProfile.Enabled)
         {
-            throw new InvalidOperationException("The assigned agent is disabled.");
+            throw new InvalidOperationException("The modpack profile is disabled.");
         }
         var utcNow = DateTime.UtcNow;
         var payload = SyncModpackCommandPayloadBuilder.Build(
@@ -105,40 +119,69 @@ public sealed class UpdaterCommandService
     public async Task<AgentCommandAckResponse?> AcknowledgeCommandAsync(
         int commandId,
         int agentId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? executionOwnerId = null)
     {
+        executionOwnerId = NormalizeExecutionOwnerId(executionOwnerId);
         await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
-        var command = await _dbContext.UpdaterAgentCommands
-            .FirstOrDefaultAsync(
-                current => current.Id == commandId && current.AgentNodeId == agentId,
-                cancellationToken);
-
-        if (command is null)
-        {
-            return null;
-        }
-
-        await _dbContext.Entry(command).ReloadAsync(cancellationToken);
-
-        if (UpdaterAgentCommandStatus.FinalStatuses.Contains(command.Status, StringComparer.Ordinal))
-        {
-            throw new InvalidOperationException("Command is already finalized.");
-        }
-
         var utcNow = DateTime.UtcNow;
-        if (command.Status == UpdaterAgentCommandStatus.Pending)
+        var claimed = await _dbContext.UpdaterAgentCommands
+            .Where(current =>
+                current.Id == commandId &&
+                current.AgentNodeId == agentId &&
+                current.Status == UpdaterAgentCommandStatus.Pending)
+            .ExecuteUpdateAsync(update => update
+                .SetProperty(current => current.Status, UpdaterAgentCommandStatus.InProgress)
+                .SetProperty(current => current.AcknowledgedUtc, utcNow)
+                .SetProperty(current => current.UpdatedUtc, utcNow)
+                .SetProperty(current => current.ExecutionOwnerId, executionOwnerId), cancellationToken);
+
+        if (claimed == 0)
         {
-            command.Status = UpdaterAgentCommandStatus.InProgress;
-            command.AcknowledgedUtc = utcNow;
-            command.UpdatedUtc = utcNow;
-            await _dbContext.SaveChangesAsync(cancellationToken);
+            var current = await _dbContext.UpdaterAgentCommands.AsNoTracking()
+                .Where(current => current.Id == commandId && current.AgentNodeId == agentId)
+                .Select(current => new { current.Status, current.ExecutionOwnerId })
+                .FirstOrDefaultAsync(cancellationToken);
+            if (current is null)
+            {
+                return null;
+            }
+
+            if (current.Status == UpdaterAgentCommandStatus.InProgress &&
+                executionOwnerId is not null &&
+                current.ExecutionOwnerId is not null &&
+                string.Equals(current.ExecutionOwnerId, executionOwnerId, StringComparison.OrdinalIgnoreCase))
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return new AgentCommandAckResponse
+                {
+                    CommandId = commandId,
+                    Status = UpdaterAgentCommandStatus.InProgress,
+                    ServerTimeUtc = DateTime.UtcNow
+                };
+            }
+
+            var message = UpdaterAgentCommandStatus.FinalStatuses.Contains(current.Status, StringComparer.Ordinal)
+                ? "Command is already finalized."
+                : "Command is already in progress.";
+            throw new InvalidOperationException(message);
+        }
+
+        var trackedCommand = _dbContext.UpdaterAgentCommands.Local
+            .FirstOrDefault(current => current.Id == commandId && current.AgentNodeId == agentId);
+        if (trackedCommand is not null)
+        {
+            trackedCommand.Status = UpdaterAgentCommandStatus.InProgress;
+            trackedCommand.AcknowledgedUtc = utcNow;
+            trackedCommand.UpdatedUtc = utcNow;
+            trackedCommand.ExecutionOwnerId = executionOwnerId;
         }
 
         await transaction.CommitAsync(cancellationToken);
         return new AgentCommandAckResponse
         {
-            CommandId = command.Id,
-            Status = command.Status,
+            CommandId = commandId,
+            Status = UpdaterAgentCommandStatus.InProgress,
             ServerTimeUtc = utcNow
         };
     }
@@ -147,8 +190,11 @@ public sealed class UpdaterCommandService
         int commandId,
         int agentId,
         AgentCommandCompletionRequest request,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? executionOwnerId = null,
+        bool requireInProgress = false)
     {
+        executionOwnerId = NormalizeExecutionOwnerId(executionOwnerId);
         await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
         var command = await _dbContext.UpdaterAgentCommands
             .Include(current => current.ModpackUpdateAudit)
@@ -162,6 +208,17 @@ public sealed class UpdaterCommandService
         }
 
         await _dbContext.Entry(command).ReloadAsync(cancellationToken);
+
+        if (command.ExecutionOwnerId is not null &&
+            !string.Equals(command.ExecutionOwnerId, executionOwnerId, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Command is owned by a different agent instance.");
+        }
+
+        if (requireInProgress && command.Status != UpdaterAgentCommandStatus.InProgress)
+        {
+            throw new InvalidOperationException("Only an in-progress command can be marked interrupted.");
+        }
 
         if (UpdaterAgentCommandStatus.FinalStatuses.Contains(command.Status, StringComparer.Ordinal))
         {
@@ -394,6 +451,48 @@ public sealed class UpdaterCommandService
             .Replace("{modpackName}", profile.Name, StringComparison.OrdinalIgnoreCase)
             .Replace("{version}", version, StringComparison.OrdinalIgnoreCase)
             .Replace("{currentVersion}", profile.CurrentVersion, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasSameSyncTarget(UpdaterModpackProfile prepared, UpdaterModpackProfile current)
+    {
+        return prepared.AgentNodeId == current.AgentNodeId &&
+               prepared.Enabled == current.Enabled &&
+               prepared.Name == current.Name &&
+               prepared.Provider == current.Provider &&
+               prepared.SourceReference == current.SourceReference &&
+               prepared.ServerPackUrl == current.ServerPackUrl &&
+               prepared.BuildServerPackFromClientFiles == current.BuildServerPackFromClientFiles &&
+               prepared.ServerPackExcludedPaths == current.ServerPackExcludedPaths &&
+               prepared.ServerPackExcludedCurseForgeProjectIds == current.ServerPackExcludedCurseForgeProjectIds &&
+               prepared.VersionLock == current.VersionLock &&
+               prepared.CurrentVersion == current.CurrentVersion &&
+               prepared.InstallRootPath == current.InstallRootPath &&
+               prepared.OverrideDirectory == current.OverrideDirectory &&
+               prepared.PreservedPaths == current.PreservedPaths &&
+               prepared.RestartMode == current.RestartMode &&
+               prepared.WarningMinutes == current.WarningMinutes &&
+               prepared.AmpInstanceName == current.AmpInstanceName &&
+               prepared.AmpApiUrl == current.AmpApiUrl &&
+               prepared.AmpConfigValuesJson == current.AmpConfigValuesJson &&
+               prepared.RequestedVersion == current.RequestedVersion &&
+               prepared.ForceFullSync == current.ForceFullSync &&
+               prepared.SkipWarnings == current.SkipWarnings &&
+               prepared.IgnoreCurrentVersion == current.IgnoreCurrentVersion;
+    }
+
+    private static string? NormalizeExecutionOwnerId(string? executionOwnerId)
+    {
+        if (string.IsNullOrWhiteSpace(executionOwnerId))
+        {
+            return null;
+        }
+
+        if (!Guid.TryParse(executionOwnerId, out var parsed))
+        {
+            throw new ArgumentException("Execution owner ID must be a GUID.", nameof(executionOwnerId));
+        }
+
+        return parsed.ToString("N");
     }
 
     private static string? TruncateOrNull(string? value, int maxLength)

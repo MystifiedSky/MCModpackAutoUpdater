@@ -99,6 +99,8 @@ public sealed class CommandHistoryItemViewModel
 
     public bool CanCancel { get; init; }
 
+    public bool CanMarkInterrupted { get; init; }
+
     public bool CanRetry { get; init; }
 
     public string? PayloadJson { get; init; }

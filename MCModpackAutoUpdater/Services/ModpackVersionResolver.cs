@@ -78,7 +78,7 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
                     ServerPackFileId: serverPackFile.Id,
                     SelectedVersion: selectedVersion);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
             }
@@ -107,7 +107,7 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
                     $"Resolved FTB version ID {targetVersion}.",
                     SelectedVersion: selectedVersion);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
             }
@@ -194,7 +194,17 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
                 }
             }
 
-            throw new InvalidOperationException($"CurseForge file ID {exactFileId} was not found or has no server pack.");
+            foreach (var parentFile in files.Where(file => file.Id != exactFileId))
+            {
+                var additionalFiles = await GetCurseForgeAdditionalFilesAsync(projectId, parentFile.Id, cancellationToken);
+                var selectedServerPack = additionalFiles.FirstOrDefault(file => file.Id == exactFileId);
+                if (selectedServerPack is not null)
+                {
+                    return new CurseForgeParentFileResolution(parentFile, [selectedServerPack]);
+                }
+            }
+
+            throw new InvalidOperationException($"CurseForge file ID {exactFileId} was not found as a parent file or additional server-pack file.");
         }
 
         foreach (var file in files.Where(file => ContainsInvariant(file.DisplayName, normalizedSelector) || ContainsInvariant(file.FileName, normalizedSelector)))
@@ -342,7 +352,7 @@ public sealed class ModpackVersionResolver : IModpackVersionResolver
 
     private async Task<T> GetJsonAsync<T>(string requestUrl, CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync(requestUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        using var response = await _httpClient.GetAsync(requestUrl, HttpCompletionOption.ResponseContentRead, cancellationToken);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         return await JsonSerializer.DeserializeAsync<T>(stream, JsonOptions, cancellationToken)

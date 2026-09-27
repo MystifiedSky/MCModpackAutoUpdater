@@ -147,7 +147,7 @@ MCModpackAutoUpdater/amp-template/
    - `Release Repository`: `MystifiedSky/MCModpackAutoUpdater`
    - `Linux Release Asset`: `mc-modpack-auto-updater-linux-x64.zip`
    - `Windows Release Asset`: `mc-modpack-auto-updater-win-x64.zip`
-   - `Web UI Port`: usually `9090`
+   - AMP's assigned `Web UI` port in the instance port configuration: defaults to `9090`, but may be allocated differently if that port is in use.
    - `Web UI Database Path`: a persistent SQLite path, usually `mc-modpack-auto-updater.db`
 5. Run AMP's update action for the instance so it downloads and extracts the release asset.
 6. Start the instance.
@@ -162,11 +162,13 @@ On first start, open `/setup`, then check the AMP console or logs for the one-ti
 The template sets these environment variables for the app:
 
 ```text
-MC_UPDATER__WebUi__BindUrl=http://0.0.0.0:{{WebUIPort}}
+MC_UPDATER__WebUi__BindUrl=http://0.0.0.0:{{$WebUIPort}}
 MC_UPDATER__WebUi__DatabasePath={{WebUiDatabasePath}}
 ```
 
 Use the source-based quick start above for development or running outside AMP.
+
+The app listener follows AMP's assigned Web UI port. When upgrading from template version 1, move any customized old `Web UI Port` application setting to AMP's instance port configuration before restarting; version 2 removes that duplicate setting.
 
 AMP fetches templates from the `amp-templates` branch, not from the `main` branch's `MCModpackAutoUpdater/amp-template/` folder. The release workflow updates application ZIPs only; it does not synchronize template files. When changing a template, update and validate both copies and the branch-level `manifest.json`.
 
@@ -515,7 +517,7 @@ The dashboard supports:
 - `Force Sync`: queue a sync even when the current version appears up to date.
 - `Disable` or `Enable`: toggle a profile.
 
-`/history` shows paginated command and audit records, payload/result JSON, and filters for agent, profile, status, and command type. Operators have read-only access. Admins can retry finalized commands, cancel pending work, and queue AMP console/config commands. A running update cannot be cancelled by changing its database status.
+`/history` shows paginated command and audit records, payload/result JSON, and filters for agent, profile, status, and command type. Operators have read-only access. Admins can retry finalized commands, cancel pending work, and queue AMP console/config commands. A running update cannot be cancelled by changing its database status. If a command is stuck after its agent stopped or lost its recovery journal, stop the affected agent and inspect the target server first, then use **Mark Interrupted** to mark the command failed. That action does not stop execution; use **Retry** only after the server is safe to update.
 
 `/agents` also provides agent details, heartbeat information, per-agent history, and arbitrary JSON command queueing for administrators. Deletion is refused while an agent or profile has active work.
 
@@ -613,7 +615,7 @@ AMP passwords/tokens and Discord bot tokens are encrypted in SQLite. Existing pl
 
 Use environment variables, user secrets in Development, or ignored `appsettings.Local.json` for private startup configuration. User secrets and `appsettings.Development.json` load only when the host environment is Development; set `DOTNET_ENVIRONMENT=Development` for the worker, or `DOTNET_ENVIRONMENT`/`ASPNETCORE_ENVIRONMENT` for the web app. No launch profile selects Development automatically. Local JSON overrides are loaded before the prefixed environment variables and are excluded from publish output. Operational settings already saved through the UI remain database-backed.
 
-Run one web runner per database and one remote agent per token. Remote agents keep a durable completion journal (`Agent:CommandStatePath`, documented in the agent guide). Keep it across upgrades. If execution was interrupted without a recorded result, the command is marked failed with an inspection message; verify the server's state before retrying. Embedded local execution uses the same conservative recovery behavior with database checkpoints.
+Run one web runner per database and one remote agent per token. The web runner locks its database path for its lifetime; a second runner using the same path refuses to start. Remote agents keep a durable completion journal (`Agent:CommandStatePath`, documented in the agent guide) containing their command ownership ID and hold an exclusive lock beside it. Keep the journal across upgrades and do not delete either lock file while its process is running. An interrupted execution with a matching checkpoint is marked failed with an inspection message; unknown in-progress work is left alone for an admin to inspect and mark interrupted. Embedded local execution uses database checkpoints for recovery. Upgrade the runner and remote agents together to benefit from command ownership.
 
 Linux deployment and self-update preserve `updates/`, `state/`, `private/`, environment/local appsettings files, and default command journal names. Keep custom in-tree journals under `state/`, or list their relative paths in deployment `preservePaths` and the apply script's colon-separated `MC_AGENT_PRESERVE_PATHS`. The published `appsettings.json` remains replaceable; put credentials in private configuration or environment variables.
 

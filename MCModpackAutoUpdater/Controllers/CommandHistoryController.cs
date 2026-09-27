@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using MCAgent.Models.AgentApi;
 using MCModpackAutoUpdater.Data;
 using MCModpackAutoUpdater.Models.Web;
 using MCModpackAutoUpdater.Security;
@@ -150,6 +151,7 @@ public sealed class CommandHistoryController : Controller
                     ? null
                     : command.ModpackUpdateAudit.AppliedVersionDisplay ?? command.ModpackUpdateAudit.AppliedVersion,
                 CanCancel = User.IsInRole(UpdaterRoles.Admin) && command.Status == UpdaterAgentCommandStatus.Pending,
+                CanMarkInterrupted = User.IsInRole(UpdaterRoles.Admin) && command.Status == UpdaterAgentCommandStatus.InProgress,
                 CanRetry = User.IsInRole(UpdaterRoles.Admin) && command.AgentNode != null &&
                            command.AgentNode.Enabled &&
                            UpdaterAgentCommandStatus.FinalStatuses.Contains(command.Status),
@@ -201,6 +203,66 @@ public sealed class CommandHistoryController : Controller
     {
         await _commandService.CancelCommandAsync(commandId, User.Identity?.Name ?? "unknown", cancellationToken);
         TempData["Message"] = $"Command {commandId} cancelled if it was still pending.";
+        return RedirectToHistory(agentId, modpackId, status, commandType, page, pageSize);
+    }
+
+    [HttpPost("/history/{commandId:int}/mark-interrupted")]
+    [Authorize(Roles = UpdaterRoles.Admin)]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> MarkInterrupted(
+        int commandId,
+        int? agentId,
+        int? modpackId,
+        string? status,
+        string? commandType,
+        int page = 1,
+        int pageSize = 50,
+        CancellationToken cancellationToken = default)
+    {
+        var command = await _dbContext.UpdaterAgentCommands.AsNoTracking()
+            .Where(current => current.Id == commandId)
+            .Select(current => new { current.AgentNodeId, current.Status, current.ExecutionOwnerId })
+            .FirstOrDefaultAsync(cancellationToken);
+        if (command is null)
+        {
+            TempData["Message"] = $"Command {commandId} was not found.";
+            return RedirectToHistory(agentId, modpackId, status, commandType, page, pageSize);
+        }
+
+        if (command.Status != UpdaterAgentCommandStatus.InProgress)
+        {
+            TempData["Message"] = $"Command {commandId} is no longer in progress; no status was changed.";
+            return RedirectToHistory(agentId, modpackId, status, commandType, page, pageSize);
+        }
+
+        var adminName = User.Identity?.Name ?? "admin";
+        var summary = $"Marked interrupted by {adminName}. Stop the runner and inspect the target server before retrying.";
+        try
+        {
+            await _commandService.CompleteCommandAsync(
+                commandId,
+                command.AgentNodeId,
+                new AgentCommandCompletionRequest
+                {
+                    Success = false,
+                    Summary = summary,
+                    ResultPayloadJson = JsonSerializer.Serialize(new
+                    {
+                        interrupted = true,
+                        markedBy = adminName,
+                        runnerMayStillBeExecuting = true
+                    })
+                },
+                cancellationToken,
+                command.ExecutionOwnerId,
+                requireInProgress: true);
+            TempData["Message"] = $"Command {commandId} marked failed by {adminName}. This did not stop the runner; inspect the server before retrying.";
+        }
+        catch (InvalidOperationException exception)
+        {
+            TempData["Message"] = $"Command {commandId} was not marked interrupted: {exception.Message}";
+        }
+
         return RedirectToHistory(agentId, modpackId, status, commandType, page, pageSize);
     }
 

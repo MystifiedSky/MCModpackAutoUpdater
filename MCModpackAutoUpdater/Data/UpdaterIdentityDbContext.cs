@@ -69,6 +69,7 @@ public sealed class UpdaterIdentityDbContext : IdentityDbContext<ApplicationUser
             entity.Property(command => command.PayloadJson).IsRequired();
             entity.Property(command => command.Status).HasMaxLength(30).IsRequired();
             entity.Property(command => command.ResultSummary).HasMaxLength(500);
+            entity.Property(command => command.ExecutionOwnerId).HasMaxLength(32);
             entity.HasIndex(command => new { command.AgentNodeId, command.Status });
             entity.HasIndex(command => command.CreatedUtc);
             entity.HasOne(command => command.AgentNode)

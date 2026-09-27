@@ -184,6 +184,10 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                 : $"amp_config set '{payload.SettingNode}' for '{payload.ModpackName ?? $"modpack #{payload.ModpackId}"}'.";
             return AgentCommandExecutionResult.Completed(summary, resultPayloadJson);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             _logger.LogWarning(
@@ -368,6 +372,10 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                 return configValue;
             }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             _logger.LogDebug(
@@ -389,6 +397,10 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                 cancellationToken);
 
             return TryExtractAmpConfigValue(configsElement, settingNode);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
@@ -427,6 +439,10 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                 .OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             _logger.LogDebug(
@@ -457,6 +473,10 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                     new Dictionary<string, object?>(StringComparer.Ordinal),
                     cancellationToken);
                 return;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch
             {
@@ -496,6 +516,10 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                 $"{strategyName} wrote '{settingValue}' but observed '{observedValue ?? "(unknown)"}'");
             return false;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             writeAttempts.Add(new AmpConfigWriteAttempt(strategyName, false, false, null, exception.Message));
@@ -529,6 +553,10 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                     cancellationToken);
                 return UnwrapAmpApiResultElement(proxyResult);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception exception)
             {
                 proxyErrors.Add($"{proxyServerKey}: {exception.Message}");
@@ -549,6 +577,10 @@ public sealed class AmpConfigCommandHandler : IAgentCommandHandler
                     controllerSessionId,
                     cancellationToken);
                 return UnwrapAmpApiResultElement(proxyResult);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception exception)
             {

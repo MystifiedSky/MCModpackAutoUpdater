@@ -168,6 +168,19 @@
                                 <button type="submit" class="danger">Cancel</button>
                             </form>
                         }
+                        @if (command.CanMarkInterrupted)
+                        {
+                            <form asp-action="MarkInterrupted" asp-route-commandId="@command.Id" method="post"
+                                  onsubmit="return confirm('This does not stop the runner. Have you stopped the agent and inspected the target server before marking the command failed?');">
+                                <input type="hidden" name="agentId" value="@Model.Filters.AgentId" />
+                                <input type="hidden" name="modpackId" value="@Model.Filters.ModpackId" />
+                                <input type="hidden" name="status" value="@Model.Filters.Status" />
+                                <input type="hidden" name="commandType" value="@Model.Filters.CommandType" />
+                                <input type="hidden" name="page" value="@Model.Filters.Page" />
+                                <input type="hidden" name="pageSize" value="@Model.Filters.PageSize" />
+                                <button type="submit" class="danger">Mark Interrupted</button>
+                            </form>
+                        }
                         @if (command.CanRetry)
                         {
                             <form asp-action="Retry" asp-route-commandId="@command.Id" method="post">

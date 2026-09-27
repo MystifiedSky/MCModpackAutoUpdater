@@ -80,7 +80,8 @@ function Get-RsyncExcludes {
         '/updates/', '/state/', '/private/',
         '/appsettings.*.json', '**/appsettings.*.json',
         '/agent-command-state*.json', '**/agent-command-state*.json',
-        '/agent-command-state*.json.tmp', '**/agent-command-state*.json.tmp'
+        '/agent-command-state*.json.tmp', '**/agent-command-state*.json.tmp',
+        '/agent-command-state*.json.lock', '**/agent-command-state*.json.lock'
     )
     $additional = Get-OptionalPropertyValue -Object $Target -PropertyName 'preservePaths'
     foreach ($path in @($additional))
@@ -95,6 +96,7 @@ function Get-RsyncExcludes {
         }
         $paths += '/' + $value.TrimEnd('/')
         $paths += '/' + $value.TrimEnd('/') + '.tmp'
+        $paths += '/' + $value.TrimEnd('/') + '.lock'
     }
     return $paths
 }

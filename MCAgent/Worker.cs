@@ -35,6 +35,8 @@ public sealed class Worker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        using var processLock = _checkpointStore.AcquireExclusiveProcessLock();
+        var executionOwnerId = await _checkpointStore.GetExecutionOwnerIdAsync(stoppingToken);
         _runtimeState.SetStatus("Starting");
         _logger.LogInformation(
             "MCAgent starting. Version={Version}, ApiBaseUrl={ApiBaseUrl}, PollInterval={PollInterval}s, BatchSize={BatchSize}",
@@ -64,7 +66,7 @@ public sealed class Worker : BackgroundService
                         break;
                     }
 
-                    await ProcessCommandAsync(command, stoppingToken);
+                    await ProcessCommandAsync(command, executionOwnerId, stoppingToken);
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -110,7 +112,10 @@ public sealed class Worker : BackgroundService
         return TimeSpan.FromSeconds(boundedPoll);
     }
 
-    private async Task ProcessCommandAsync(AgentCommandPayload command, CancellationToken cancellationToken)
+    private async Task ProcessCommandAsync(
+        AgentCommandPayload command,
+        string executionOwnerId,
+        CancellationToken cancellationToken)
     {
         var commandType = command.CommandType?.Trim() ?? string.Empty;
         var displayCommandType = string.IsNullOrWhiteSpace(commandType) ? "(missing type)" : commandType;
@@ -129,6 +134,22 @@ public sealed class Worker : BackgroundService
         }
 
         var checkpoint = await _checkpointStore.GetAsync(command);
+        var remoteExecutionOwnerId = command.ExecutionOwnerId?.Trim();
+        var hasRemoteOwner = !string.IsNullOrWhiteSpace(remoteExecutionOwnerId);
+        var ownerMatches = hasRemoteOwner && string.Equals(
+            remoteExecutionOwnerId,
+            executionOwnerId,
+            StringComparison.OrdinalIgnoreCase);
+
+        if (hasRemoteOwner && !ownerMatches)
+        {
+            _logger.LogWarning(
+                "Skipping command #{CommandId}; it is owned by another agent instance.",
+                command.Id);
+            _runtimeState.SetStatus("Idle");
+            return;
+        }
+
         if (checkpoint?.State == AgentCommandCheckpointStore.ResultPendingState)
         {
             await SubmitCheckpointResultAsync(command.Id, checkpoint, cancellationToken);
@@ -150,10 +171,21 @@ public sealed class Worker : BackgroundService
         var remoteStatus = command.Status?.Trim() ?? string.Empty;
         if (string.Equals(remoteStatus, "InProgress", StringComparison.OrdinalIgnoreCase))
         {
-            var reason = checkpoint?.State == AgentCommandCheckpointStore.ReadyState
-                ? "The runner reports this command in progress, but the agent stopped before recording that its handler had started. Its execution state is ambiguous, so the agent did not run it again. Inspect the target server and logs before retrying this command."
-                : "The runner reports this command in progress, but this agent has no matching local checkpoint. The prior execution state is unknown, so the agent did not run it again. Inspect the target server and logs before retrying this command.";
-            await CompleteInterruptedCommandAsync(command, displayCommandType, reason, cancellationToken);
+            if (checkpoint?.State == AgentCommandCheckpointStore.ReadyState && ownerMatches)
+            {
+                await CompleteInterruptedCommandAsync(
+                    command,
+                    displayCommandType,
+                    "The runner reports this command in progress, but the agent stopped before recording that its handler had started. Its execution state is ambiguous, so the agent did not run it again. Inspect the target server and logs before retrying this command.",
+                    cancellationToken);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Skipping in-progress command #{CommandId}; this agent has no owner-matching checkpoint that proves it may recover the command.",
+                    command.Id);
+            }
+
             _runtimeState.SetStatus("Idle");
             return;
         }
@@ -353,7 +385,7 @@ public sealed class Worker : BackgroundService
                 HttpStatusCode.GatewayTimeout;
         }
 
-        return exception is HttpRequestException or TimeoutException;
+        return exception is HttpRequestException or TimeoutException or TaskCanceledException;
     }
 
     private static IReadOnlyDictionary<string, IAgentCommandHandler> BuildHandlerMap(

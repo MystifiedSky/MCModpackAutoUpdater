@@ -7,8 +7,10 @@ out/
 *.suo
 *.db
 *.db-*
+*.db.lock
 *.sqlite
 *.sqlite-*
+*.sqlite.lock
 mc-auto-updater-state.json
 MCAgent/scripts/deploy-targets.json
 data-protection-keys/
@@ -16,3 +18,4 @@ data-protection-keys/
 **/appsettings.*.local.json
 agent-command-state*.json
 agent-command-state*.json.tmp
+agent-command-state*.json.lock

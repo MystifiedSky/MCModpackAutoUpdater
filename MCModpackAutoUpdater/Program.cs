@@ -133,6 +133,7 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddControllersWithViews();
 builder.Services.AddAntiforgery();
 builder.Services.AddSingleton<FirstRunSetupToken>();
+builder.Services.AddHostedService<RunnerDatabaseLease>();
 builder.Services.AddHostedService<IdentityBootstrapService>();
 builder.Services.AddHostedService<UpdaterDatabaseBootstrapService>();
 builder.Services.AddScoped<UpdaterAgentAuthenticationService>();

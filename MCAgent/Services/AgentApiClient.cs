@@ -11,18 +11,26 @@ public sealed class AgentApiClient : IAgentApiClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const string AgentTokenHeaderName = "X-Agent-Token";
+    private const string AgentInstanceHeaderName = "X-Agent-Instance";
 
     private readonly HttpClient _httpClient;
     private readonly AgentOptions _options;
+    private readonly AgentCommandCheckpointStore _checkpointStore;
 
-    public AgentApiClient(IOptions<AgentOptions> options)
-        : this(options, new HttpClient())
+    public AgentApiClient(
+        IOptions<AgentOptions> options,
+        AgentCommandCheckpointStore checkpointStore)
+        : this(options, checkpointStore, new HttpClient())
     {
     }
 
-    public AgentApiClient(IOptions<AgentOptions> options, HttpClient httpClient)
+    public AgentApiClient(
+        IOptions<AgentOptions> options,
+        AgentCommandCheckpointStore checkpointStore,
+        HttpClient httpClient)
     {
         _options = options.Value;
+        _checkpointStore = checkpointStore;
         _httpClient = httpClient;
         _httpClient.BaseAddress ??= new Uri(_options.ApiBaseUrl.TrimEnd('/') + "/");
         _httpClient.Timeout = TimeSpan.FromSeconds(_options.HttpTimeoutSeconds);
@@ -32,7 +40,7 @@ public sealed class AgentApiClient : IAgentApiClient
         AgentHeartbeatRequest request,
         CancellationToken cancellationToken)
     {
-        using var message = CreateRequest(HttpMethod.Post, "api/agent/heartbeat");
+        using var message = await CreateRequestAsync(HttpMethod.Post, "api/agent/heartbeat", cancellationToken);
         message.Content = JsonContent.Create(request, options: JsonOptions);
 
         using var response = await _httpClient.SendAsync(message, cancellationToken);
@@ -44,7 +52,10 @@ public sealed class AgentApiClient : IAgentApiClient
         CancellationToken cancellationToken)
     {
         var boundedTake = Math.Clamp(take, 1, 100);
-        using var message = CreateRequest(HttpMethod.Get, $"api/agent/commands/pending?take={boundedTake}");
+        using var message = await CreateRequestAsync(
+            HttpMethod.Get,
+            $"api/agent/commands/pending?take={boundedTake}",
+            cancellationToken);
 
         using var response = await _httpClient.SendAsync(message, cancellationToken);
         return await ReadResponseAsync<List<AgentCommandPayload>>(response, cancellationToken);
@@ -54,7 +65,10 @@ public sealed class AgentApiClient : IAgentApiClient
         int commandId,
         CancellationToken cancellationToken)
     {
-        using var message = CreateRequest(HttpMethod.Post, $"api/agent/commands/{commandId}/ack");
+        using var message = await CreateRequestAsync(
+            HttpMethod.Post,
+            $"api/agent/commands/{commandId}/ack",
+            cancellationToken);
         message.Content = JsonContent.Create(new { }, options: JsonOptions);
 
         using var response = await _httpClient.SendAsync(message, cancellationToken);
@@ -66,7 +80,10 @@ public sealed class AgentApiClient : IAgentApiClient
         AgentCommandCompletionRequest request,
         CancellationToken cancellationToken)
     {
-        using var message = CreateRequest(HttpMethod.Post, $"api/agent/commands/{commandId}/complete");
+        using var message = await CreateRequestAsync(
+            HttpMethod.Post,
+            $"api/agent/commands/{commandId}/complete",
+            cancellationToken);
         message.Content = JsonContent.Create(request, options: JsonOptions);
 
         using var response = await _httpClient.SendAsync(message, cancellationToken);
@@ -77,18 +94,35 @@ public sealed class AgentApiClient : IAgentApiClient
         int modpackId,
         CancellationToken cancellationToken)
     {
-        using var message = CreateRequest(HttpMethod.Get, $"api/agent/modpacks/{modpackId}/amp-runtime");
+        using var message = await CreateRequestAsync(
+            HttpMethod.Get,
+            $"api/agent/modpacks/{modpackId}/amp-runtime",
+            cancellationToken);
 
         using var response = await _httpClient.SendAsync(message, cancellationToken);
         return await ReadResponseAsync<AgentAmpRuntimeConfigResponse>(response, cancellationToken);
     }
 
-    private HttpRequestMessage CreateRequest(HttpMethod method, string uri)
+    private async Task<HttpRequestMessage> CreateRequestAsync(
+        HttpMethod method,
+        string uri,
+        CancellationToken cancellationToken)
     {
         var request = new HttpRequestMessage(method, uri);
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        request.Headers.Add(AgentTokenHeaderName, _options.AuthToken);
-        return request;
+        try
+        {
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            request.Headers.Add(AgentTokenHeaderName, _options.AuthToken);
+            request.Headers.Add(
+                AgentInstanceHeaderName,
+                await _checkpointStore.GetExecutionOwnerIdAsync(cancellationToken));
+            return request;
+        }
+        catch
+        {
+            request.Dispose();
+            throw;
+        }
     }
 
     private static async Task<T> ReadResponseAsync<T>(

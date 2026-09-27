@@ -63,13 +63,20 @@ public sealed class AgentApiController : ControllerBase
             return Unauthorized(new { error = "Invalid agent token." });
         }
 
+        if (!TryGetExecutionOwnerId(Request, out var executionOwnerId))
+        {
+            return BadRequest(new { error = "X-Agent-Instance must contain a valid GUID." });
+        }
+
         var clampedTake = Math.Clamp(take, 1, 100);
         var commands = await _dbContext.UpdaterAgentCommands
             .AsNoTracking()
             .Where(command =>
                 command.AgentNodeId == agent.Id &&
                 (command.Status == UpdaterAgentCommandStatus.Pending ||
-                 command.Status == UpdaterAgentCommandStatus.InProgress))
+                 command.Status == UpdaterAgentCommandStatus.InProgress &&
+                 (command.ExecutionOwnerId == null ||
+                  executionOwnerId != null && command.ExecutionOwnerId == executionOwnerId)))
             .OrderBy(command => command.CreatedUtc)
             .Take(clampedTake)
             .Select(command => new AgentCommandPayload
@@ -78,7 +85,8 @@ public sealed class AgentApiController : ControllerBase
                 CommandType = command.CommandType,
                 PayloadJson = command.PayloadJson,
                 Status = command.Status,
-                CreatedUtc = command.CreatedUtc
+                CreatedUtc = command.CreatedUtc,
+                ExecutionOwnerId = command.ExecutionOwnerId
             })
             .ToListAsync(cancellationToken);
 
@@ -168,9 +176,15 @@ public sealed class AgentApiController : ControllerBase
             return Unauthorized(new { error = "Invalid agent token." });
         }
 
+        if (!TryGetExecutionOwnerId(Request, out var executionOwnerId))
+        {
+            return BadRequest(new { error = "X-Agent-Instance must contain a valid GUID." });
+        }
+
         try
         {
-            var response = await _commandService.AcknowledgeCommandAsync(commandId, agent.Id, cancellationToken);
+            var response = await _commandService.AcknowledgeCommandAsync(
+                commandId, agent.Id, cancellationToken, executionOwnerId);
             return response is null
                 ? NotFound(new { error = "Command not found." })
                 : Ok(response);
@@ -193,9 +207,15 @@ public sealed class AgentApiController : ControllerBase
             return Unauthorized(new { error = "Invalid agent token." });
         }
 
+        if (!TryGetExecutionOwnerId(Request, out var executionOwnerId))
+        {
+            return BadRequest(new { error = "X-Agent-Instance must contain a valid GUID." });
+        }
+
         try
         {
-            var response = await _commandService.CompleteCommandAsync(commandId, agent.Id, request, cancellationToken);
+            var response = await _commandService.CompleteCommandAsync(
+                commandId, agent.Id, request, cancellationToken, executionOwnerId);
             return response is null
                 ? NotFound(new { error = "Command not found." })
                 : Ok(response);
@@ -215,5 +235,24 @@ public sealed class AgentApiController : ControllerBase
 
         var trimmed = value.Trim();
         return trimmed.Length <= maxLength ? trimmed : trimmed[..maxLength];
+    }
+
+    private static bool TryGetExecutionOwnerId(HttpRequest request, out string? executionOwnerId)
+    {
+        var headerValue = request.Headers["X-Agent-Instance"].ToString().Trim();
+        if (string.IsNullOrEmpty(headerValue))
+        {
+            executionOwnerId = null;
+            return true;
+        }
+
+        if (!Guid.TryParse(headerValue, out var parsed))
+        {
+            executionOwnerId = null;
+            return false;
+        }
+
+        executionOwnerId = parsed.ToString("N");
+        return true;
     }
 }

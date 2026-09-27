@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -78,6 +79,10 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
             return AgentCommandExecutionResult.Completed(
                 $"amp_console command sent for '{payload.ModpackName ?? $"modpack #{payload.ModpackId}"}'.",
                 resultPayloadJson);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
@@ -170,7 +175,11 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
                     return true;
                 }
             }
-            catch (Exception exception)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception) when (exception is not ConsoleDispatchFailureException)
             {
                 _logger.LogWarning(
                     exception,
@@ -200,7 +209,11 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
                     return true;
                 }
             }
-            catch (Exception exception)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception) when (exception is not ConsoleDispatchFailureException)
             {
                 _logger.LogWarning(
                     exception,
@@ -256,22 +269,35 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
                     null));
                 return true;
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (AmpApiHttpException exception) when (
+                exception.StatusCode is HttpStatusCode.NotFound or
+                    HttpStatusCode.MethodNotAllowed or
+                    HttpStatusCode.NotImplemented)
+            {
+                attempts.Add(new AmpConsoleAttempt(
+                    $"{candidate.Module}/{candidate.Method} ({sessionLabel}:{proxyServerKey})",
+                    candidate.ParameterKey,
+                    false,
+                    exception.Message));
+            }
             catch (Exception exception)
             {
-                _logger.LogWarning(
-                    exception,
-                    "amp_console call failed via {Module}/{Method} ({ParameterKey}) for server key {ProxyServerKey} [{SessionLabel}].",
-                    candidate.Module,
-                    candidate.Method,
-                    candidate.ParameterKey,
-                    proxyServerKey,
-                    sessionLabel);
-
                 attempts.Add(new AmpConsoleAttempt(
                     $"{candidate.Module}/{candidate.Method} ({sessionLabel}:{proxyServerKey})",
                     candidate.ParameterKey,
                     false,
                     TruncateForLog(exception.Message, 500)));
+                var outcome = exception is OperationCanceledException or HttpRequestException
+                    ? "The request timed out or lost its connection; AMP may have executed it"
+                    : "AMP did not confirm the command was rejected before execution";
+                throw new ConsoleDispatchFailureException(
+                    $"{outcome}. No alternate console method was attempted for " +
+                    $"{candidate.Module}/{candidate.Method} ({sessionLabel}:{proxyServerKey}).",
+                    exception);
             }
         }
 
@@ -445,7 +471,8 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException(
+            throw new AmpApiHttpException(
+                response.StatusCode,
                 $"AMP API call {operationName} failed with HTTP {(int)response.StatusCode} ({response.StatusCode}).");
         }
 
@@ -976,4 +1003,15 @@ public sealed class AmpConsoleCommandHandler : IAgentCommandHandler
         string Module,
         string Method,
         string ParameterKey);
+
+    private sealed class AmpApiHttpException(HttpStatusCode statusCode, string message)
+        : InvalidOperationException(message)
+    {
+        public HttpStatusCode StatusCode { get; } = statusCode;
+    }
+
+    private sealed class ConsoleDispatchFailureException(string message, Exception innerException)
+        : InvalidOperationException(message, innerException)
+    {
+    }
 }
